@@ -3,11 +3,16 @@ import {
   CompletionItem,
   CompletionItemKind,
   Definition,
+  Hover,
   InitializeParams,
   InitializeResult,
   Location,
+  MarkupKind,
+  ParameterInformation,
   Position,
   ProposedFeatures,
+  SignatureHelp,
+  SignatureInformation,
   TextDocumentSyncKind,
   TextDocuments
 } from 'vscode-languageserver/node';
@@ -16,7 +21,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { buildVbaProject, getCompletions, getDefinition, VbaProjectFile } from './vbaProject';
+import {
+  buildVbaProject,
+  getCompletions,
+  getDefinition,
+  getHover,
+  getSignatureHelp,
+  VbaProjectFile
+} from './vbaProject';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -28,7 +40,11 @@ connection.onInitialize((_params: InitializeParams): InitializeResult => {
       completionProvider: {
         triggerCharacters: ['.', ' ']
       },
-      definitionProvider: true
+      definitionProvider: true,
+      hoverProvider: true,
+      signatureHelpProvider: {
+        triggerCharacters: ['(', ',']
+      }
     }
   };
 });
@@ -86,6 +102,59 @@ connection.onDefinition((params): Definition | undefined => {
     start: toLspPosition(definition.range.start),
     end: toLspPosition(definition.range.end)
   });
+});
+
+connection.onHover((params): Hover | undefined => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return undefined;
+  }
+
+  const project = buildProjectForDocument(document);
+  const hover = getHover(project, {
+    uri: document.uri,
+    position: params.position
+  });
+  if (hover === undefined) {
+    return undefined;
+  }
+
+  return {
+    contents: {
+      kind: MarkupKind.Markdown,
+      value: hover.contents
+    }
+  };
+});
+
+connection.onSignatureHelp((params): SignatureHelp | undefined => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return undefined;
+  }
+
+  const project = buildProjectForDocument(document);
+  const signatureHelp = getSignatureHelp(project, {
+    uri: document.uri,
+    position: params.position
+  });
+  if (signatureHelp === undefined) {
+    return undefined;
+  }
+
+  return {
+    activeParameter: signatureHelp.activeParameter,
+    activeSignature: 0,
+    signatures: [
+      SignatureInformation.create(
+        signatureHelp.label,
+        signatureHelp.documentation,
+        ...signatureHelp.parameters.map((parameter) =>
+          ParameterInformation.create(parameter.label, parameter.documentation)
+        )
+      )
+    ]
+  };
 });
 
 documents.listen(connection);

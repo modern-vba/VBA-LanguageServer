@@ -5,7 +5,9 @@ import {
   buildVbaProject,
   getCompletions,
   getDefinition,
+  getHover,
   getModuleIdentities,
+  getSignatureHelp,
   getTypeFields,
   resolveName
 } from './vbaProject';
@@ -916,4 +918,157 @@ test('form designer controls are not inferred for WithEvents handler resolution'
       end: { line: 4, character: 18 }
     }
   });
+});
+
+test('hover displays a Doxygen-style DocumentationComment for a private helper', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        "'* @brief Reads a value.",
+        "'*",
+        "'* @details Uses the configured source.",
+        "'* @param Key Key to read.",
+        "'* @return The configured value.",
+        'Private Function ReadValue(ByVal Key As String) As String',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    ReadValue("id")',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const hover = getHover(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 12, character: 8 }
+  });
+
+  assert.deepEqual(hover, {
+    contents: [
+      'Reads a value.',
+      '',
+      'Uses the configured source.',
+      '',
+      '@param Key Key to read.',
+      '@return The configured value.'
+    ].join('\n')
+  });
+});
+
+test('signature help displays documented parameters and return value for parenthesized calls', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        "'* @brief Reads a value.",
+        "'* @param Key Key to read.",
+        "'* @param Fallback Value used when the key is missing.",
+        "'* @return The configured value.",
+        'Public Function ReadValue(ByVal Key As String, ByVal Fallback As String) As String',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    ReadValue("id", ',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 11, character: 20 }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'ReadValue(Key, Fallback) As String',
+    activeParameter: 1,
+    documentation: [
+      'Reads a value.',
+      '',
+      '@return The configured value.'
+    ].join('\n'),
+    parameters: [
+      {
+        label: 'Key',
+        documentation: 'Key to read.'
+      },
+      {
+        label: 'Fallback',
+        documentation: 'Value used when the key is missing.'
+      }
+    ]
+  });
+});
+
+test('ordinary apostrophe comments are ignored by hover and signature help', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        "' @brief This ordinary comment must be ignored.",
+        'Public Function ReadValue(ByVal Key As String) As String',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    ReadValue("id")',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const hover = getHover(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 8, character: 8 }
+  });
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 8, character: 15 }
+  });
+
+  assert.equal(hover, undefined);
+  assert.deepEqual(signatureHelp, {
+    label: 'ReadValue(Key) As String',
+    activeParameter: 0,
+    documentation: undefined,
+    parameters: [{ label: 'Key', documentation: undefined }]
+  });
+});
+
+test('signature help ignores parenthesis-free calls', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        "'* @brief Reads a value.",
+        "'* @param Key Key to read.",
+        'Public Sub ReadValue(ByVal Key As String)',
+        'End Sub',
+        '',
+        'Public Sub Run()',
+        '    ReadValue "id"',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 9, character: 15 }
+  });
+
+  assert.equal(signatureHelp, undefined);
 });

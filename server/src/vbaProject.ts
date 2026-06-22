@@ -37,6 +37,20 @@ export interface DefinitionLocation {
   range: SourceRange;
 }
 
+export interface HoverResult {
+  contents: string;
+}
+
+export interface SignatureHelpResult {
+  label: string;
+  activeParameter: number;
+  documentation?: string;
+  parameters: Array<{
+    label: string;
+    documentation?: string;
+  }>;
+}
+
 export type NameResolutionResult =
   | {
       source: 'vba';
@@ -64,6 +78,20 @@ interface VbaDefinition {
   uri: string;
   range: SourceRange;
   children?: VbaDefinition[];
+  documentation?: DocumentationComment;
+  signature?: SignatureInfo;
+}
+
+interface DocumentationComment {
+  brief: string[];
+  details: string[];
+  params: string[];
+  returns?: string;
+}
+
+interface SignatureInfo {
+  label: string;
+  parameters: string[];
 }
 
 interface ProcedureScope {
@@ -137,6 +165,64 @@ export function getTypeFields(project: VbaProject, typeName: string): { name: st
     name: field.name,
     range: field.range
   })) ?? [];
+}
+
+export function getHover(project: VbaProject, request: CompletionRequest): HoverResult | undefined {
+  const definition_location = getDefinition(project, request);
+  if (definition_location === undefined) {
+    return undefined;
+  }
+
+  const definition = findDefinitionByLocation(project, definition_location);
+  if (definition?.documentation === undefined) {
+    return undefined;
+  }
+
+  return {
+    contents: renderDocumentationComment(definition.documentation)
+  };
+}
+
+export function getSignatureHelp(
+  project: VbaProject,
+  request: CompletionRequest
+): SignatureHelpResult | undefined {
+  const current_module = findModule(project, request.uri);
+  if (current_module === undefined) {
+    return undefined;
+  }
+
+  const call_expression = getCallExpressionAt(current_module.lines, request.position);
+  if (call_expression === undefined) {
+    return undefined;
+  }
+
+  const resolution = resolveName(project, {
+    uri: request.uri,
+    position: {
+      line: request.position.line,
+      character: call_expression.nameStart
+    }
+  });
+  if (resolution?.source !== 'vba') {
+    return undefined;
+  }
+
+  const definition = findDefinitionByLocation(project, resolution.definition);
+  if (definition?.signature === undefined) {
+    return undefined;
+  }
+
+  const parameter_docs = getParameterDocumentation(definition.documentation);
+  return {
+    label: definition.signature.label,
+    activeParameter: Math.min(call_expression.activeParameter, Math.max(definition.signature.parameters.length - 1, 0)),
+    documentation: renderSignatureDocumentation(definition.documentation),
+    parameters: definition.signature.parameters.map((parameter) => ({
+      label: parameter,
+      documentation: parameter_docs.get(parameter.toLowerCase())
+    }))
+  };
 }
 
 export function getDefinition(
@@ -329,6 +415,72 @@ function parseModuleIdentity(lines: string[]): string | undefined {
   return undefined;
 }
 
+function parseDocumentationComment(lines: string[], member_line: number): DocumentationComment | undefined {
+  const comment_lines: string[] = [];
+
+  for (let line_index = member_line - 1; line_index >= 0; line_index -= 1) {
+    const match = /^\s*'\*\s?(.*)$/.exec(lines[line_index]);
+    if (match === null) {
+      break;
+    }
+
+    comment_lines.unshift(match[1]);
+  }
+
+  if (comment_lines.length === 0) {
+    return undefined;
+  }
+
+  const documentation: DocumentationComment = {
+    brief: [],
+    details: [],
+    params: []
+  };
+  let current_section: 'brief' | 'details' | undefined = 'brief';
+
+  for (const line of comment_lines) {
+    const brief_match = /^@brief\s*(.*)$/i.exec(line);
+    if (brief_match !== null) {
+      documentation.brief.push(brief_match[1].trim());
+      current_section = 'brief';
+      continue;
+    }
+
+    const details_match = /^@details\s*(.*)$/i.exec(line);
+    if (details_match !== null) {
+      documentation.details.push(details_match[1].trim());
+      current_section = 'details';
+      continue;
+    }
+
+    const param_match = /^@param\s+(.+)$/i.exec(line);
+    if (param_match !== null) {
+      documentation.params.push(param_match[1].trim());
+      current_section = undefined;
+      continue;
+    }
+
+    const return_match = /^@returns?\s+(.+)$/i.exec(line);
+    if (return_match !== null) {
+      documentation.returns = return_match[1].trim();
+      current_section = undefined;
+      continue;
+    }
+
+    if (line.trim() === '') {
+      continue;
+    }
+
+    if (current_section === 'details') {
+      documentation.details.push(line.trim());
+    } else {
+      documentation.brief.push(line.trim());
+    }
+  }
+
+  return documentation;
+}
+
 function parseModuleMembers(
   uri: string,
   lines: string[],
@@ -367,7 +519,8 @@ function parseModuleMembers(
         range: {
           start: { line: line_index, character: name_start },
           end: { line: line_index, character: name_start + name.length }
-        }
+        },
+        documentation: parseDocumentationComment(lines, line_index)
       });
       continue;
     }
@@ -385,7 +538,8 @@ function parseModuleMembers(
         range: {
           start: { line: line_index, character: name_start },
           end: { line: line_index, character: name_start + name.length }
-        }
+        },
+        documentation: parseDocumentationComment(lines, line_index)
       });
 
       const end_line_index = findBlockEndLine(lines, line_index + 1, 'enum');
@@ -409,6 +563,7 @@ function parseModuleMembers(
           start: { line: line_index, character: name_start },
           end: { line: line_index, character: name_start + name.length }
         },
+        documentation: parseDocumentationComment(lines, line_index),
         children: parseTypeFieldDefinitions(uri, lines, line_index + 1, end_line_index, visibility)
       });
       line_index = end_line_index;
@@ -428,6 +583,10 @@ function parseModuleMembers(
     const end_keyword = procedure_kind === 'property' ? 'property' : procedure_kind;
     const name = procedure_match[4];
     const name_start = line.indexOf(name);
+    const parameter_start = line.indexOf('(') + 1;
+    const parameter_definitions = procedure_match[5] === undefined
+      ? []
+      : parseParameterDefinitions(uri, line, line_index, procedure_match[5], parameter_start);
     definitions.push({
       name,
       kind: procedure_kind,
@@ -436,14 +595,12 @@ function parseModuleMembers(
       range: {
         start: { line: line_index, character: name_start },
         end: { line: line_index, character: name_start + name.length }
-      }
+      },
+      documentation: parseDocumentationComment(lines, line_index),
+      signature: buildSignatureInfo(line, name, parameter_definitions)
     });
 
     const end_line_index = findProcedureEndLine(lines, line_index + 1, end_keyword);
-    const parameter_start = line.indexOf('(') + 1;
-    const parameter_definitions = procedure_match[5] === undefined
-      ? []
-      : parseParameterDefinitions(uri, line, line_index, procedure_match[5], parameter_start);
 
     procedureScopes.push({
       range: {
@@ -580,6 +737,21 @@ function parseParameterDefinitions(
   return definitions;
 }
 
+function buildSignatureInfo(
+  line: string,
+  name: string,
+  parameterDefinitions: VbaDefinition[]
+): SignatureInfo {
+  const return_match = /\)\s+As\s+(.+?)\s*$/i.exec(line);
+  const parameters = parameterDefinitions.map((parameter) => parameter.name);
+  const return_suffix = return_match === null ? '' : ` As ${return_match[1].trim()}`;
+
+  return {
+    label: `${name}(${parameters.join(', ')})${return_suffix}`,
+    parameters
+  };
+}
+
 function findProcedureEndLine(
   lines: string[],
   start_line: number,
@@ -681,6 +853,35 @@ function getQualifiedReferenceAt(
   return undefined;
 }
 
+function getCallExpressionAt(
+  lines: string[],
+  position: SourcePosition
+): { name: string; nameStart: number; activeParameter: number } | undefined {
+  const line = lines[position.line] ?? '';
+  const text_before_position = line.slice(0, position.character);
+  const open_paren = text_before_position.lastIndexOf('(');
+  if (open_paren === -1) {
+    return undefined;
+  }
+
+  const before_paren = text_before_position.slice(0, open_paren);
+  const match = /(?:\bCall\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)\s*$/i.exec(before_paren);
+  if (match === null) {
+    return undefined;
+  }
+
+  const name = match[1];
+  return {
+    name,
+    nameStart: before_paren.lastIndexOf(name),
+    activeParameter: countCommas(text_before_position.slice(open_paren + 1))
+  };
+}
+
+function countCommas(text: string): number {
+  return [...text].filter((character) => character === ',').length;
+}
+
 function isVbaSourceUri(uri: string): boolean {
   return /\.(bas|cls|frm)$/i.test(uriPathname(uri));
 }
@@ -718,6 +919,74 @@ function sameName(left: string, right: string): boolean {
 
 function singleMatch<T>(items: T[]): T | undefined {
   return items.length === 1 ? items[0] : undefined;
+}
+
+function findDefinitionByLocation(
+  project: VbaProject,
+  location: DefinitionLocation
+): VbaDefinition | undefined {
+  return project.modules
+    .flatMap((module) => module.definitions)
+    .find((definition) =>
+      sameUri(definition.uri, location.uri)
+        && comparePosition(definition.range.start, location.range.start) === 0
+        && comparePosition(definition.range.end, location.range.end) === 0
+    );
+}
+
+function renderDocumentationComment(documentation: DocumentationComment): string {
+  const sections: string[] = [];
+  const brief = documentation.brief.join(' ').trim();
+  const details = documentation.details.join(' ').trim();
+
+  if (brief !== '') {
+    sections.push(brief);
+  }
+  if (details !== '') {
+    sections.push(details);
+  }
+  if (documentation.params.length > 0 || documentation.returns !== undefined) {
+    const tags = [
+      ...documentation.params.map((param) => `@param ${param}`),
+      ...(documentation.returns === undefined ? [] : [`@return ${documentation.returns}`])
+    ];
+    sections.push(tags.join('\n'));
+  }
+
+  return sections.join('\n\n');
+}
+
+function renderSignatureDocumentation(documentation: DocumentationComment | undefined): string | undefined {
+  if (documentation === undefined) {
+    return undefined;
+  }
+
+  const sections: string[] = [];
+  const brief = documentation.brief.join(' ').trim();
+  if (brief !== '') {
+    sections.push(brief);
+  }
+  if (documentation.returns !== undefined) {
+    sections.push(`@return ${documentation.returns}`);
+  }
+
+  return sections.length === 0 ? undefined : sections.join('\n\n');
+}
+
+function getParameterDocumentation(documentation: DocumentationComment | undefined): Map<string, string> {
+  const result = new Map<string, string>();
+  if (documentation === undefined) {
+    return result;
+  }
+
+  for (const parameter of documentation.params) {
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)\s+(.+)$/.exec(parameter);
+    if (match !== null) {
+      result.set(match[1].toLowerCase(), match[2]);
+    }
+  }
+
+  return result;
 }
 
 function toDefinitionLocation(definition: VbaDefinition): DefinitionLocation {
