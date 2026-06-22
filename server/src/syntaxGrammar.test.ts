@@ -66,6 +66,40 @@ test('extension contributes main HostApplication configuration', () => {
   });
 });
 
+test('extension contributes additional HostApplications configuration', () => {
+  const package_json = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8')
+  ) as {
+    contributes?: {
+      configuration?: {
+        properties?: Record<string, {
+          scope?: string;
+          type?: string;
+          items?: {
+            type?: string;
+            enum?: string[];
+          };
+          default?: string[];
+        }>;
+      };
+    };
+  };
+  const additional_hosts_setting = package_json.contributes?.configuration?.properties?.[
+    'vbaLanguageServer.additionalHostApplications'
+  ];
+
+  assert.deepEqual(additional_hosts_setting, {
+    scope: 'resource',
+    type: 'array',
+    items: {
+      type: 'string',
+      enum: ['word']
+    },
+    default: [],
+    description: 'Controls additional Office host applications enabled alongside the main VBA host application.'
+  });
+});
+
 test('VBA TextMate grammar has lexical scopes for representative VBA fixtures', () => {
   const grammar = readGrammar();
   const patterns = flattenPatterns(grammar);

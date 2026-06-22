@@ -60,6 +60,18 @@
           ],
           "default": "excel",
           "description": "Controls the primary Office host application for unqualified VBA host object model references."
+        },
+        "vbaLanguageServer.additionalHostApplications": {
+          "scope": "resource",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "word"
+            ]
+          },
+          "default": [],
+          "description": "Controls additional Office host applications enabled alongside the main VBA host application."
         }
       }
     }

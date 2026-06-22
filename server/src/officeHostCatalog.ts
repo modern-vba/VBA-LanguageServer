@@ -4,9 +4,16 @@ export const C_DEFAULT_MAIN_HOST_APPLICATION: HostApplication = 'excel';
 
 export interface HostApplicationSelectionOptions {
   mainHostApplication?: HostApplication;
+  additionalHostApplications?: HostApplication[];
 }
 
-const bundledHostDefinitionsByApplication: Record<HostApplication, HostDefinition[]> = {
+export interface HostApplicationSelection {
+  mainHostApplication: HostApplication;
+  additionalHostApplications: HostApplication[];
+  enabledHostApplications: HostApplication[];
+}
+
+const bundledHostDefinitionsByApplication: Partial<Record<HostApplication, HostDefinition[]>> = {
   excel: [
     {
       name: 'Application',
@@ -91,13 +98,30 @@ const bundledHostDefinitionsByApplication: Record<HostApplication, HostDefinitio
 };
 
 export function getBundledHostDefinitions(options: HostApplicationSelectionOptions = {}): HostDefinition[] {
+  return createHostApplicationSelection(options).enabledHostApplications
+    .flatMap((hostApplication) => getBundledHostDefinitionsForApplication(hostApplication));
+}
+
+export function createHostApplicationSelection(
+  options: HostApplicationSelectionOptions = {}
+): HostApplicationSelection {
   const main_host_application = options.mainHostApplication ?? C_DEFAULT_MAIN_HOST_APPLICATION;
-  return getBundledHostDefinitionsForApplication(main_host_application);
+  const additional_host_applications = uniqueHostApplications(
+    (options.additionalHostApplications ?? []).filter((hostApplication) =>
+      hostApplication !== main_host_application
+    )
+  );
+
+  return {
+    mainHostApplication: main_host_application,
+    additionalHostApplications: additional_host_applications,
+    enabledHostApplications: [main_host_application, ...additional_host_applications]
+  };
 }
 
 export function getBundledHostDefinitionsForApplication(hostApplication: HostApplication): HostDefinition[] {
   return cloneHostDefinitionsWithApplication(
-    bundledHostDefinitionsByApplication[hostApplication],
+    bundledHostDefinitionsByApplication[hostApplication] ?? [],
     hostApplication
   );
 }
@@ -116,6 +140,10 @@ export function formatHostApplicationName(hostApplication: HostApplication): str
       return 'Excel';
     case 'word':
       return 'Word';
+    case 'powerpoint':
+      return 'PowerPoint';
+    case 'access':
+      return 'Access';
   }
 }
 
@@ -137,4 +165,20 @@ function cloneHostDefinitionWithApplication(
       cloneHostDefinitionWithApplication(member, hostApplication)
     )
   };
+}
+
+function uniqueHostApplications(hostApplications: HostApplication[]): HostApplication[] {
+  const seen = new Set<HostApplication>();
+  const result: HostApplication[] = [];
+
+  for (const host_application of hostApplications) {
+    if (seen.has(host_application)) {
+      continue;
+    }
+
+    seen.add(host_application);
+    result.push(host_application);
+  }
+
+  return result;
 }

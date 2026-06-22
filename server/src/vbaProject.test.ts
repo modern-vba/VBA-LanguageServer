@@ -136,6 +136,235 @@ test('main Word HostApplication enables bundled Word member completion', () => {
   );
 });
 
+test('additional HostApplication preserves main host completion and enables host-qualified root completion', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Application',
+        '    Word.',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    mainHostApplication: 'excel',
+    additionalHostApplications: ['word']
+  });
+
+  const unqualified_completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 7 }
+  });
+  const qualified_completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: 10 }
+  });
+
+  assert.deepEqual(
+    unqualified_completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Application', detail: 'Excel.Application' }]
+  );
+  assert.deepEqual(
+    qualified_completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [
+      { label: 'Application', detail: 'Word.Application' },
+      { label: 'Document', detail: 'Word.Document' },
+      { label: 'Range', detail: 'Word.Range' },
+      { label: 'Selection', detail: 'Word.Selection' }
+    ]
+  );
+});
+
+test('host-qualified references resolve through enabled HostApplications', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Word.Application',
+        '    Word.Application.Active',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    additionalHostApplications: ['word']
+  });
+
+  const hover = getHover(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 12 }
+  });
+  const member_completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: 27 }
+  });
+
+  assert.deepEqual(hover, {
+    contents: 'Word.Application\n\nRepresents the Microsoft Word application.'
+  });
+  assert.deepEqual(
+    member_completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'ActiveDocument', detail: 'Word.ActiveDocument' }]
+  );
+});
+
+test('host-qualified type annotations enable typed member completion', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Dim app As Word.Application',
+        '    app.Active',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    additionalHostApplications: ['word']
+  });
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: 14 }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'ActiveDocument', detail: 'Word.ActiveDocument' }]
+  );
+});
+
+test('source definitions outrank HostApplication qualifier names', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Word.Application',
+        '    Word.',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Word.bas',
+      text: [
+        'Attribute VB_Name = "Word"',
+        'Option Explicit',
+        '',
+        'Public Function Application() As String',
+        'End Function'
+      ].join('\n')
+    }
+  ], {
+    additionalHostApplications: ['word']
+  });
+
+  const definition = getDefinition(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 12 }
+  });
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: 10 }
+  });
+
+  assert.deepEqual(definition, {
+    uri: 'file:///project/Word.bas',
+    range: {
+      start: { line: 3, character: 16 },
+      end: { line: 3, character: 27 }
+    }
+  });
+  assert.deepEqual(completions, []);
+});
+
+test('disabled HostApplication qualifiers do not resolve', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Word.Application',
+        '    Word.',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const hover = getHover(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 12 }
+  });
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: 10 }
+  });
+
+  assert.equal(hover, undefined);
+  assert.deepEqual(completions, []);
+});
+
+test('same-name non-main HostDefinitions remain ambiguous for unqualified references and completion', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    SharedOnly',
+        'End Sub'
+      ].join('\n')
+    }
+  ], {
+    mainHostApplication: 'excel',
+    additionalHostApplications: ['word', 'powerpoint'],
+    hostDefinitions: [
+      {
+        name: 'SharedOnly',
+        kind: 'class',
+        hostApplication: 'word',
+        documentation: 'Word-only definition.'
+      },
+      {
+        name: 'SharedOnly',
+        kind: 'class',
+        hostApplication: 'powerpoint',
+        documentation: 'PowerPoint-only definition.'
+      }
+    ]
+  });
+
+  const hover = getHover(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 8 }
+  });
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 4, character: 10 }
+  });
+
+  assert.equal(hover, undefined);
+  assert.deepEqual(completions, []);
+});
+
 test('bundled Excel HostDefinitions are not source definition or rename targets', () => {
   const project = buildVbaProject([
     {

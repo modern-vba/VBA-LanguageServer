@@ -1,6 +1,11 @@
 import path from 'node:path';
 
-import { formatHostApplicationName, getBundledHostDefinitions } from './officeHostCatalog';
+import {
+  createHostApplicationSelection,
+  formatHostApplicationName,
+  getBundledHostDefinitions,
+  type HostApplicationSelection
+} from './officeHostCatalog';
 
 export interface SourcePosition {
   line: number;
@@ -44,7 +49,7 @@ export type CompletionEntryKind =
   | 'variable';
 
 export type HostDefinitionKind = 'class' | 'property' | 'function' | 'enum' | 'enumMember';
-export type HostApplication = 'excel' | 'word';
+export type HostApplication = 'excel' | 'word' | 'powerpoint' | 'access';
 
 export interface HostDefinition {
   name: string;
@@ -57,6 +62,7 @@ export interface HostDefinition {
 export interface BuildVbaProjectOptions {
   hostDefinitions?: HostDefinition[];
   mainHostApplication?: HostApplication;
+  additionalHostApplications?: HostApplication[];
 }
 
 export interface DefinitionLocation {
@@ -213,9 +219,11 @@ interface VbaModule {
 export interface VbaProject {
   modules: VbaModule[];
   hostDefinitions: HostDefinition[];
+  hostApplicationSelection: HostApplicationSelection;
 }
 
 const C_IDENTIFIER_PATTERN = /[A-Za-z_][A-Za-z0-9_]*/;
+const C_TYPE_NAME_PATTERN = /[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?/;
 
 export function buildVbaProject(
   files: VbaProjectFile[],
@@ -225,11 +233,12 @@ export function buildVbaProject(
     .filter((file) => isVbaSourceUri(file.uri))
     .map((file) => parseModule(file));
 
+  const host_application_selection = createHostApplicationSelection(options);
+
   return {
     modules,
-    hostDefinitions: options.hostDefinitions ?? getBundledHostDefinitions({
-      mainHostApplication: options.mainHostApplication
-    })
+    hostDefinitions: options.hostDefinitions ?? getBundledHostDefinitions(host_application_selection),
+    hostApplicationSelection: host_application_selection
   };
 }
 
@@ -261,7 +270,8 @@ export function updateVbaProjectFile(
       modules: project.modules.map((module) =>
         sameUri(module.uri, uri) ? updated_module : module
       ),
-      hostDefinitions: project.hostDefinitions
+      hostDefinitions: project.hostDefinitions,
+      hostApplicationSelection: project.hostApplicationSelection
     },
     strategy: can_replace_member ? 'moduleMember' : 'fullRebuild'
   };
@@ -291,6 +301,7 @@ export function getCompletions(project: VbaProject, request: CompletionRequest):
     }));
   const host_candidates = project.hostDefinitions
     .filter((definition) => prefix === '' || definition.name.toLowerCase().startsWith(prefix))
+    .filter((definition) => isUnqualifiedHostCompletionDefinition(project, definition))
     .map((definition) => ({
       label: definition.name,
       kind: completionKindForHostDefinition(definition),
@@ -304,12 +315,55 @@ export function getCompletions(project: VbaProject, request: CompletionRequest):
   ]);
 }
 
+function isUnqualifiedHostCompletionDefinition(project: VbaProject, definition: HostDefinition): boolean {
+  const matches = project.hostDefinitions.filter((candidate) => sameName(candidate.name, definition.name));
+  return selectUnqualifiedHostDefinition(project, matches) === definition;
+}
+
+function getRootHostCompletions(
+  project: VbaProject,
+  currentModule: VbaModule,
+  qualifier: string,
+  prefix: string
+): CompletionEntry[] | undefined {
+  const host_application = resolveHostApplicationQualifier(project, currentModule, qualifier);
+  if (host_application === undefined) {
+    return undefined;
+  }
+
+  return project.hostDefinitions
+    .filter((definition) => definition.hostApplication === host_application)
+    .filter((definition) => prefix === '' || definition.name.toLowerCase().startsWith(prefix))
+    .map((definition) => ({
+      label: definition.name,
+      kind: completionKindForHostDefinition(definition),
+      detail: getHostDefinitionDetail(definition)
+    }));
+}
+
 function getTypedMemberCompletions(
   project: VbaProject,
   currentModule: VbaModule,
   position: SourcePosition,
   request: { qualifier: string; prefix: string }
 ): CompletionEntry[] {
+  const root_host_completions = getRootHostCompletions(project, currentModule, request.qualifier, request.prefix);
+  if (root_host_completions !== undefined) {
+    return root_host_completions;
+  }
+
+  const host_definition = resolveHostQualifiedPath(project, currentModule, request.qualifier);
+  if (host_definition?.members !== undefined) {
+    const prefix = request.prefix.toLowerCase();
+    return host_definition.members
+      .filter((member) => prefix === '' || member.name.toLowerCase().startsWith(prefix))
+      .map((member) => ({
+        label: member.name,
+        kind: completionKindForHostDefinition(member),
+        detail: getHostDefinitionDetail(member)
+      }));
+  }
+
   const type_name = findTypeNameForExpression(project, currentModule, position, request.qualifier);
   if (type_name === undefined) {
     return [];
@@ -585,6 +639,19 @@ export function resolveName(
       return toVbaResolution(qualified_definition);
     }
 
+    const host_qualified_definition = resolveHostQualifiedDefinition(
+      project,
+      current_module,
+      qualified_reference.qualifier,
+      qualified_reference.member
+    );
+    if (host_qualified_definition !== undefined) {
+      return {
+        source: 'host',
+        definition: host_qualified_definition
+      };
+    }
+
     return resolveTypedMemberDefinition(
       project,
       current_module,
@@ -631,7 +698,7 @@ export function resolveName(
   }
 
   const host_matches = project.hostDefinitions.filter((definition) => sameName(definition.name, identifier));
-  const host_definition = singleMatch(host_matches);
+  const host_definition = selectUnqualifiedHostDefinition(project, host_matches);
   if (host_definition !== undefined) {
     return {
       source: 'host',
@@ -707,6 +774,85 @@ function resolveQualifiedModuleDefinition(
   return singleMatch(matches);
 }
 
+function resolveHostQualifiedDefinition(
+  project: VbaProject,
+  currentModule: VbaModule,
+  qualifier: string,
+  member: string
+): HostDefinition | undefined {
+  const host_path_definition = resolveHostQualifiedPath(project, currentModule, qualifier);
+  if (host_path_definition !== undefined) {
+    return singleMatch(host_path_definition.members?.filter((definition) =>
+      sameName(definition.name, member)
+    ) ?? []);
+  }
+
+  const host_application = resolveHostApplicationQualifier(project, currentModule, qualifier);
+  if (host_application === undefined) {
+    return undefined;
+  }
+
+  return singleMatch(project.hostDefinitions.filter((definition) =>
+    definition.hostApplication === host_application && sameName(definition.name, member)
+  ));
+}
+
+function resolveHostQualifiedPath(
+  project: VbaProject,
+  currentModule: VbaModule,
+  qualifier: string
+): HostDefinition | undefined {
+  const parts = qualifier.split('.');
+  if (parts.length !== 2) {
+    return undefined;
+  }
+
+  const host_application = resolveHostApplicationQualifier(project, currentModule, parts[0]);
+  if (host_application === undefined) {
+    return undefined;
+  }
+
+  return singleMatch(project.hostDefinitions.filter((definition) =>
+    definition.hostApplication === host_application && sameName(definition.name, parts[1])
+  ));
+}
+
+function resolveHostApplicationQualifier(
+  project: VbaProject,
+  currentModule: VbaModule,
+  qualifier: string
+): HostApplication | undefined {
+  if (qualifier.includes('.')) {
+    return undefined;
+  }
+
+  const source_module = project.modules.find((module) =>
+    module.folderUri.toLowerCase() === currentModule.folderUri.toLowerCase()
+      && sameName(module.identity, qualifier)
+  );
+  if (source_module !== undefined) {
+    return undefined;
+  }
+
+  return project.hostApplicationSelection.enabledHostApplications.find((hostApplication) =>
+    sameName(hostApplication, qualifier) || sameName(formatHostApplicationName(hostApplication), qualifier)
+  );
+}
+
+function selectUnqualifiedHostDefinition(
+  project: VbaProject,
+  matches: HostDefinition[]
+): HostDefinition | undefined {
+  if (matches.length === 1) {
+    return matches[0];
+  }
+
+  const main_host_matches = matches.filter((definition) =>
+    definition.hostApplication === project.hostApplicationSelection.mainHostApplication
+  );
+  return singleMatch(main_host_matches);
+}
+
 function resolveTypedMemberDefinition(
   project: VbaProject,
   current_module: VbaModule,
@@ -719,7 +865,11 @@ function resolveTypedMemberDefinition(
     return undefined;
   }
 
-  const host_type = project.hostDefinitions.find((definition) => sameName(definition.name, type_name));
+  const host_type = resolveHostQualifiedPath(project, current_module, type_name)
+    ?? selectUnqualifiedHostDefinition(
+      project,
+      project.hostDefinitions.filter((definition) => sameName(definition.name, type_name))
+    );
   const host_member = singleMatch(host_type?.members?.filter((definition) => sameName(definition.name, member)) ?? []);
   if (host_member !== undefined) {
     return {
@@ -894,7 +1044,7 @@ function parseModuleMembers(
     }
 
     const with_events_match =
-      /^\s*(?:(?:Public|Private|Dim)\s+)?WithEvents\s+([A-Za-z_][A-Za-z0-9_]*)\s+As\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
+      new RegExp(`^\\s*(?:(?:Public|Private|Dim)\\s+)?WithEvents\\s+(${C_IDENTIFIER_PATTERN.source})\\s+As\\s+(${C_TYPE_NAME_PATTERN.source})\\b`, 'i').exec(line);
     if (with_events_match !== null) {
       const declaration = {
         name: with_events_match[1],
@@ -1190,7 +1340,7 @@ function parseParameterDefinitions(
     if (match !== null) {
       const name = match[1];
       const name_start = line.indexOf(name, segment_start);
-      const type_match = /\bAs\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(trimmed_segment);
+      const type_match = new RegExp(`\\bAs\\s+(${C_TYPE_NAME_PATTERN.source})\\b`, 'i').exec(trimmed_segment);
       definitions.push({
         name,
         kind: 'parameter',
@@ -1226,7 +1376,7 @@ function buildSignatureInfo(
 }
 
 function parseReturnTypeName(line: string): string | undefined {
-  const return_match = /\)\s+As\s+([A-Za-z_][A-Za-z0-9_]*)\b/i.exec(line);
+  const return_match = new RegExp(`\\)\\s+As\\s+(${C_TYPE_NAME_PATTERN.source})\\b`, 'i').exec(line);
   return return_match?.[1];
 }
 
@@ -1255,7 +1405,7 @@ function parseProcedureDefinitions(
   for (let line_index = start_line; line_index < end_line; line_index += 1) {
     const line = lines[line_index];
     const local_match =
-      /^\s*Dim\s+([A-Za-z_][A-Za-z0-9_]*)\b(?:\s+As\s+([A-Za-z_][A-Za-z0-9_]*))?/i.exec(line);
+      new RegExp(`^\\s*Dim\\s+(${C_IDENTIFIER_PATTERN.source})\\b(?:\\s+As\\s+(${C_TYPE_NAME_PATTERN.source}))?`, 'i').exec(line);
     if (local_match === null) {
       continue;
     }
@@ -1284,7 +1434,7 @@ function getMemberCompletionAt(
 ): { qualifier: string; prefix: string } | undefined {
   const line = lines[position.line] ?? '';
   const text_before_position = line.slice(0, position.character);
-  const match = /([A-Za-z_][A-Za-z0-9_]*(?:\s*\([^()]*\))?)\.\s*([A-Za-z_][A-Za-z0-9_]*)?$/i.exec(text_before_position);
+  const match = /([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\s*\([^()]*\))?)\.\s*([A-Za-z_][A-Za-z0-9_]*)?$/i.exec(text_before_position);
   if (match === null) {
     return undefined;
   }
@@ -1428,7 +1578,11 @@ function getMembersForType(
   currentModule: VbaModule,
   typeName: string
 ): { name: string; kind: CompletionEntryKind; detail?: string }[] {
-  const host_type = project.hostDefinitions.find((definition) => sameName(definition.name, typeName));
+  const host_type = resolveHostQualifiedPath(project, currentModule, typeName)
+    ?? selectUnqualifiedHostDefinition(
+      project,
+      project.hostDefinitions.filter((definition) => sameName(definition.name, typeName))
+    );
   if (host_type?.members !== undefined) {
     return host_type.members.map((member) => ({
       name: member.name,
@@ -1813,7 +1967,7 @@ function getQualifiedReferenceAt(
       continue;
     }
 
-    const qualifier_match = /([A-Za-z_][A-Za-z0-9_]*)\.\s*$/.exec(line.slice(0, start));
+    const qualifier_match = /([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.\s*$/.exec(line.slice(0, start));
     if (qualifier_match === null) {
       return undefined;
     }
