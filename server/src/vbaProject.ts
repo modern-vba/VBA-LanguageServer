@@ -20,6 +20,8 @@ export interface VbaProjectFile {
 export interface CompletionEntry {
   label: string;
   kind: CompletionEntryKind;
+  insertText?: string;
+  insertTextFormat?: 'snippet';
 }
 
 export interface CompletionRequest {
@@ -36,6 +38,7 @@ export type CompletionEntryKind =
   | 'namespace'
   | 'parameter'
   | 'property'
+  | 'snippet'
   | 'type'
   | 'variable';
 
@@ -269,6 +272,7 @@ export function getCompletions(project: VbaProject, request: CompletionRequest):
     return getTypedMemberCompletions(project, current_module, request.position, member_completion);
   }
 
+  const end_statement_completion = getEndStatementCompletionAt(current_module, request.position);
   const prefix = getIdentifierPrefix(current_module.lines, request.position).toLowerCase();
   const project_candidates = project.modules
     .filter((module) => module.folderUri.toLowerCase() === current_module.folderUri.toLowerCase())
@@ -286,7 +290,11 @@ export function getCompletions(project: VbaProject, request: CompletionRequest):
       kind: completionKindForHostDefinition(definition)
     }));
 
-  return uniqueCompletionEntries([...project_candidates, ...host_candidates]);
+  return uniqueCompletionEntries([
+    ...(end_statement_completion === undefined ? [] : [end_statement_completion]),
+    ...project_candidates,
+    ...host_candidates
+  ]);
 }
 
 function getTypedMemberCompletions(
@@ -1277,6 +1285,88 @@ function getMemberCompletionAt(
     qualifier: match[1],
     prefix: match[2] ?? ''
   };
+}
+
+function getEndStatementCompletionAt(
+  module: VbaModule,
+  position: SourcePosition
+): CompletionEntry | undefined {
+  if (position.line < module.codeStartLine) {
+    return undefined;
+  }
+
+  const line = module.lines[position.line] ?? '';
+  if (position.character !== line.length) {
+    return undefined;
+  }
+
+  const structure_text = getCodeTextForStructure(line).trim();
+  const closer = getEndStatementCloser(structure_text);
+  if (closer === undefined || hasFollowingCloser(module.lines, position.line + 1, closer)) {
+    return undefined;
+  }
+
+  const base_indent = /^\s*/.exec(line)?.[0] ?? '';
+  const body_indent = `${base_indent}    `;
+  return {
+    label: `Insert ${closer}`,
+    kind: 'snippet',
+    insertText: `\n${body_indent}$0\n${base_indent}${closer}`,
+    insertTextFormat: 'snippet'
+  };
+}
+
+function getEndStatementCloser(text: string): string | undefined {
+  if (/^(?:(?:Public|Private|Friend)\s+)?Sub\b/i.test(text)) {
+    return 'End Sub';
+  }
+  if (/^(?:(?:Public|Private|Friend)\s+)?Function\b/i.test(text)) {
+    return 'End Function';
+  }
+  if (/^(?:(?:Public|Private|Friend)\s+)?Property\s+(?:Get|Let|Set)\b/i.test(text)) {
+    return 'End Property';
+  }
+  if (/^If\b.*\bThen\s*$/i.test(text)) {
+    return 'End If';
+  }
+  if (/^For\b/i.test(text)) {
+    return 'Next';
+  }
+  if (/^Do\b/i.test(text)) {
+    return 'Loop';
+  }
+  if (/^While\b/i.test(text)) {
+    return 'Wend';
+  }
+  if (/^Select\s+Case\b/i.test(text)) {
+    return 'End Select';
+  }
+  if (/^With\b/i.test(text)) {
+    return 'End With';
+  }
+  if (/^(?:(?:Public|Private)\s+)?Enum\b/i.test(text)) {
+    return 'End Enum';
+  }
+  if (/^(?:(?:Public|Private)\s+)?Type\b/i.test(text)) {
+    return 'End Type';
+  }
+
+  return undefined;
+}
+
+function hasFollowingCloser(lines: string[], startLine: number, closer: string): boolean {
+  const closer_pattern = new RegExp(`^\\s*${escapeRegExp(closer).replace(/\s+/g, '\\s+')}\\b`, 'i');
+  for (let line_index = startLine; line_index < lines.length; line_index += 1) {
+    if (closer_pattern.test(getCodeTextForStructure(lines[line_index]).trim())) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function findTypeNameForExpression(

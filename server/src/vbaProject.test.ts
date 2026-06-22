@@ -2534,3 +2534,108 @@ function formatText(
   assert.equal(edits.length, 1);
   return edits[0].text;
 }
+
+test('EndStatementCompletion offers snippets for every supported block opener', () => {
+  const cases: Array<[string, string]> = [
+    ['Public Sub Run()', 'End Sub'],
+    ['Public Function BuildValue() As String', 'End Function'],
+    ['Public Property Get DisplayName() As String', 'End Property'],
+    ['If ready Then', 'End If'],
+    ['For index = 1 To 10', 'Next'],
+    ['For Each item In items', 'Next'],
+    ['Do', 'Loop'],
+    ['While ready', 'Wend'],
+    ['Select Case mode', 'End Select'],
+    ['With target', 'End With'],
+    ['Public Enum RunMode', 'End Enum'],
+    ['Public Type CustomerRecord', 'End Type']
+  ];
+
+  for (const [opener, closer] of cases) {
+    assert.deepEqual(endStatementCompletions(opener), [
+      {
+        label: `Insert ${closer}`,
+        kind: 'snippet',
+        insertText: `\n    $0\n${closer}`,
+        insertTextFormat: 'snippet'
+      }
+    ]);
+  }
+});
+
+test('EndStatementCompletion aligns snippet indentation with the opener line', () => {
+  assert.deepEqual(endStatementCompletions('    If ready Then'), [
+    {
+      label: 'Insert End If',
+      kind: 'snippet',
+      insertText: '\n        $0\n    End If',
+      insertTextFormat: 'snippet'
+    }
+  ]);
+});
+
+test('EndStatementCompletion is not offered in comments, strings, inline blocks, designer text, or before line end', () => {
+  assert.deepEqual(endStatementCompletions("' Public Sub Run()"), []);
+  assert.deepEqual(endStatementCompletions('"Public Sub Run()"'), []);
+  assert.deepEqual(endStatementCompletions('If ready Then value = 1'), []);
+  assert.deepEqual(endStatementCompletions('Public Sub Run()', 10), []);
+
+  const form_project = buildVbaProject([
+    {
+      uri: 'file:///project/SampleForm.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form SampleForm',
+        'End',
+        'Attribute VB_Name = "SampleForm"',
+        'Option Explicit'
+      ].join('\n')
+    }
+  ]);
+  const snippets = getCompletions(form_project, {
+    uri: 'file:///project/SampleForm.frm',
+    position: { line: 1, character: 'Begin VB.Form SampleForm'.length }
+  }).filter((completion) => completion.insertTextFormat === 'snippet');
+
+  assert.deepEqual(snippets, []);
+});
+
+test('EndStatementCompletion avoids duplicate closers that already match the opener', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+  const snippets = getCompletions(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 3, character: 'Public Sub Run()'.length }
+  }).filter((completion) => completion.insertTextFormat === 'snippet');
+
+  assert.deepEqual(snippets, []);
+});
+
+function endStatementCompletions(line: string, character = line.length): ReturnType<typeof getCompletions> {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        line
+      ].join('\n')
+    }
+  ]);
+
+  return getCompletions(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 3, character }
+  }).filter((completion) => completion.insertTextFormat === 'snippet');
+}

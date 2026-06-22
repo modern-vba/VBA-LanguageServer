@@ -6,6 +6,7 @@ import {
   Hover,
   InitializeParams,
   InitializeResult,
+  InsertTextFormat,
   Location,
   MarkupKind,
   ParameterInformation,
@@ -106,7 +107,9 @@ connection.onCompletion((params): CompletionItem[] => {
     position: params.position
   }).map((item) => ({
     label: item.label,
-    kind: toLspCompletionItemKind(item.kind)
+    kind: toLspCompletionItemKind(item.kind),
+    insertText: item.insertText,
+    insertTextFormat: item.insertTextFormat === 'snippet' ? InsertTextFormat.Snippet : undefined
   }));
 });
 
@@ -320,6 +323,8 @@ function toLspCompletionItemKind(kind: CompletionEntryKind): CompletionItemKind 
       return CompletionItemKind.Variable;
     case 'property':
       return CompletionItemKind.Property;
+    case 'snippet':
+      return CompletionItemKind.Snippet;
     case 'type':
       return CompletionItemKind.Struct;
     case 'variable':
