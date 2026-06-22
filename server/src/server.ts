@@ -52,8 +52,6 @@ const hostApplicationConfigurationProvider = new HostApplicationConfigurationPro
   connection.workspace.getConfiguration({ scopeUri, section: 'vbaLanguageServer' })
 );
 
-void hostCatalogManager.refreshFromExcelComAsync();
-
 connection.onInitialize((_params: InitializeParams): InitializeResult => {
   return {
     capabilities: {
@@ -290,6 +288,7 @@ async function buildProjectForDocument(document: TextDocument): Promise<ReturnTy
   }
 
   const host_application_options = await hostApplicationConfigurationProvider.getOptions(document.uri);
+  void hostCatalogManager.refreshSelectedHostApplicationsFromComAsync(host_application_options);
   return buildVbaProject([...files.values()], {
     ...host_application_options,
     hostDefinitions: hostCatalogManager.getDefinitions(host_application_options)

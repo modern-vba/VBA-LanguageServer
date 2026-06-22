@@ -1,6 +1,12 @@
 import type { HostApplication, HostDefinition } from './vbaProject';
 
 export const C_DEFAULT_MAIN_HOST_APPLICATION: HostApplication = 'excel';
+export const C_SUPPORTED_HOST_APPLICATIONS: readonly HostApplication[] = [
+  'excel',
+  'word',
+  'powerpoint',
+  'access'
+];
 
 export interface HostApplicationSelectionOptions {
   mainHostApplication?: HostApplication;

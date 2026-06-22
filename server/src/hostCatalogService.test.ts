@@ -1,85 +1,193 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 
 import { HostCatalogManager } from './hostCatalogService';
-import type { HostDefinition } from './vbaProject';
+import type { HostApplication, HostDefinition } from './vbaProject';
 
-test('cached host catalog is available immediately and COM refresh takes precedence asynchronously', async () => {
-  const cached_definitions: HostDefinition[] = [
-    { name: 'CachedApplication', documentation: 'cached metadata' }
-  ];
-  const com_definitions: HostDefinition[] = [
-    { name: 'ComApplication', documentation: 'COM metadata' }
-  ];
-  let written_cache: HostDefinition[] | undefined;
-
-  const manager = new HostCatalogManager({
-    platform: 'win32',
-    readCache: () => cached_definitions,
-    writeCache: (definitions) => {
-      written_cache = definitions;
-    },
-    discoverFromCom: async () => com_definitions
-  });
-
-  assert.deepEqual(manager.getDefinitions(), cached_definitions);
-
-  const refresh = manager.refreshFromExcelComAsync();
-
-  assert.deepEqual(manager.getDefinitions(), cached_definitions);
-
-  await refresh;
-
-  assert.deepEqual(manager.getDefinitions(), com_definitions);
-  assert.deepEqual(written_cache, com_definitions);
-});
-
-test('COM refresh is skipped outside Windows and preserves bundled fallback', async () => {
-  let com_discovery_called = false;
+test('host catalog manager uses isolated cache files per HostApplication', () => {
+  const cache_directory = path.join('cache-root', 'host-catalogs');
+  const cache_paths = new Map<HostApplication, string>();
   const manager = new HostCatalogManager({
     platform: 'linux',
-    readCache: () => undefined,
-    discoverFromCom: async () => {
-      com_discovery_called = true;
-      return [{ name: 'ComApplication' }];
+    cacheDirectory: cache_directory,
+    readCache: (hostApplication, cachePath) => {
+      cache_paths.set(hostApplication, cachePath);
+      return [{ name: `Cached${hostApplication}` }];
     }
-  });
-
-  const definitions_before_refresh = manager.getDefinitions();
-
-  await manager.refreshFromExcelComAsync();
-
-  assert.equal(com_discovery_called, false);
-  assert.deepEqual(manager.getDefinitions(), definitions_before_refresh);
-  assert.ok(manager.getDefinitions().some((definition) => definition.name === 'Application'));
-});
-
-test('COM refresh failure preserves cached definitions without breaking completion data', async () => {
-  const cached_definitions: HostDefinition[] = [
-    { name: 'CachedRange', documentation: 'cached metadata' }
-  ];
-  const manager = new HostCatalogManager({
-    platform: 'win32',
-    readCache: () => cached_definitions,
-    discoverFromCom: async () => {
-      throw new Error('Excel is not installed');
-    }
-  });
-
-  await manager.refreshFromExcelComAsync();
-
-  assert.deepEqual(manager.getDefinitions(), cached_definitions);
-});
-
-test('host catalog manager resolves definitions for the selected HostApplication', () => {
-  const manager = new HostCatalogManager({
-    platform: 'linux',
-    readCache: () => undefined
   });
 
   assert.deepEqual(
-    manager.getDefinitions({ mainHostApplication: 'word' }).map((definition) => definition.name),
-    ['Application', 'Document', 'Range', 'Selection']
+    manager.getDefinitions({
+      mainHostApplication: 'excel',
+      additionalHostApplications: ['word', 'powerpoint', 'access']
+    }).map((definition) => ({ name: definition.name, hostApplication: definition.hostApplication })),
+    [
+      { name: 'Cachedexcel', hostApplication: 'excel' },
+      { name: 'Cachedword', hostApplication: 'word' },
+      { name: 'Cachedpowerpoint', hostApplication: 'powerpoint' },
+      { name: 'Cachedaccess', hostApplication: 'access' }
+    ]
+  );
+  assert.deepEqual(Object.fromEntries(cache_paths), {
+    excel: path.join(cache_directory, 'excel.json'),
+    word: path.join(cache_directory, 'word.json'),
+    powerpoint: path.join(cache_directory, 'powerpoint.json'),
+    access: path.join(cache_directory, 'access.json')
+  });
+});
+
+test('COM refresh runs only for selected HostApplications on Windows', async () => {
+  const discovery_calls: HostApplication[] = [];
+  const manager = new HostCatalogManager({
+    platform: 'win32',
+    readCache: () => undefined,
+    discoverFromCom: async (hostApplication) => {
+      discovery_calls.push(hostApplication);
+      return [{ name: `Com${hostApplication}` }];
+    }
+  });
+
+  await manager.refreshSelectedHostApplicationsFromComAsync({
+    mainHostApplication: 'word',
+    additionalHostApplications: ['access']
+  });
+
+  assert.deepEqual(discovery_calls, ['word', 'access']);
+  assert.deepEqual(
+    manager.getDefinitions({
+      mainHostApplication: 'word',
+      additionalHostApplications: ['access']
+    }).map((definition) => ({ name: definition.name, hostApplication: definition.hostApplication })),
+    [
+      { name: 'Comword', hostApplication: 'word' },
+      { name: 'Comaccess', hostApplication: 'access' }
+    ]
+  );
+  assert.equal(
+    manager.getDefinitions({ mainHostApplication: 'excel' }).some((definition) => definition.name === 'Comexcel'),
+    false
+  );
+});
+
+test('selected COM refresh keeps cached definitions available while discovery is pending', async () => {
+  let resolve_discovery: (definitions: HostDefinition[]) => void = () => {};
+  const pending_discovery = new Promise<HostDefinition[]>((resolve) => {
+    resolve_discovery = resolve;
+  });
+  const manager = new HostCatalogManager({
+    platform: 'win32',
+    readCache: (hostApplication) =>
+      hostApplication === 'excel' ? [{ name: 'CachedExcel' }] : undefined,
+    discoverFromCom: async () => pending_discovery
+  });
+
+  const refresh = manager.refreshSelectedHostApplicationsFromComAsync({ mainHostApplication: 'excel' });
+
+  assert.deepEqual(
+    manager.getDefinitions({ mainHostApplication: 'excel' }),
+    [{ name: 'CachedExcel', hostApplication: 'excel' }]
+  );
+
+  resolve_discovery([{ name: 'ComExcel' }]);
+  await refresh;
+
+  assert.deepEqual(
+    manager.getDefinitions({ mainHostApplication: 'excel' }),
+    [{ name: 'ComExcel', hostApplication: 'excel' }]
+  );
+});
+
+test('successful selected COM refresh writes only the selected host cache', async () => {
+  const cache_directory = path.join('cache-root', 'host-catalogs');
+  const writes: Array<{
+    hostApplication: HostApplication;
+    cachePath: string;
+    definitions: HostDefinition[];
+  }> = [];
+  const manager = new HostCatalogManager({
+    platform: 'win32',
+    cacheDirectory: cache_directory,
+    readCache: (hostApplication) =>
+      hostApplication === 'excel' ? [{ name: 'CachedExcel' }] : undefined,
+    writeCache: (hostApplication, cachePath, definitions) => {
+      writes.push({ hostApplication, cachePath, definitions });
+    },
+    discoverFromCom: async (hostApplication) => [{ name: `Discovered${hostApplication}` }]
+  });
+
+  await manager.refreshSelectedHostApplicationsFromComAsync({ mainHostApplication: 'word' });
+
+  assert.deepEqual(writes, [
+    {
+      hostApplication: 'word',
+      cachePath: path.join(cache_directory, 'word.json'),
+      definitions: [{ name: 'Discoveredword', hostApplication: 'word' }]
+    }
+  ]);
+  assert.deepEqual(
+    manager.getDefinitions({ mainHostApplication: 'word' }),
+    [{ name: 'Discoveredword', hostApplication: 'word' }]
+  );
+  assert.deepEqual(
+    manager.getDefinitions({ mainHostApplication: 'excel' }),
+    [{ name: 'CachedExcel', hostApplication: 'excel' }]
+  );
+});
+
+test('COM refresh is skipped outside Windows and preserves bundled fallback', async () => {
+  const discovery_calls: HostApplication[] = [];
+  const manager = new HostCatalogManager({
+    platform: 'linux',
+    readCache: () => undefined,
+    discoverFromCom: async (hostApplication) => {
+      discovery_calls.push(hostApplication);
+      return [{ name: `Com${hostApplication}` }];
+    }
+  });
+
+  const definitions_before_refresh = manager.getDefinitions({
+    mainHostApplication: 'powerpoint',
+    additionalHostApplications: ['access']
+  });
+
+  await manager.refreshSelectedHostApplicationsFromComAsync({
+    mainHostApplication: 'powerpoint',
+    additionalHostApplications: ['access']
+  });
+
+  assert.deepEqual(discovery_calls, []);
+  assert.deepEqual(
+    manager.getDefinitions({
+      mainHostApplication: 'powerpoint',
+      additionalHostApplications: ['access']
+    }),
+    definitions_before_refresh
+  );
+  assert.ok(definitions_before_refresh.some((definition) => definition.hostApplication === 'powerpoint'));
+  assert.ok(definitions_before_refresh.some((definition) => definition.hostApplication === 'access'));
+});
+
+test('COM refresh failure preserves cached definitions without surfacing an error', async () => {
+  let write_called = false;
+  const manager = new HostCatalogManager({
+    platform: 'win32',
+    readCache: (hostApplication) =>
+      hostApplication === 'word' ? [{ name: 'CachedWord' }] : undefined,
+    writeCache: () => {
+      write_called = true;
+    },
+    discoverFromCom: async () => {
+      throw new Error('Office is not installed');
+    }
+  });
+
+  await manager.refreshSelectedHostApplicationsFromComAsync({ mainHostApplication: 'word' });
+
+  assert.equal(write_called, false);
+  assert.deepEqual(
+    manager.getDefinitions({ mainHostApplication: 'word' }),
+    [{ name: 'CachedWord', hostApplication: 'word' }]
   );
 });
 
