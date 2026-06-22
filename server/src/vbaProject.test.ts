@@ -7,6 +7,7 @@ import {
   getDefinition,
   getHover,
   getModuleIdentities,
+  getRenameEdits,
   getRenameTarget,
   getSignatureHelp,
   getTypeFields,
@@ -260,6 +261,389 @@ test('assignment-based object inference does not enable member dot completion', 
   });
 
   assert.deepEqual(completions, []);
+});
+
+test('rename edits source declarations and resolved references without comments or strings', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Builder.bas',
+      text: [
+        'Attribute VB_Name = "Builder"',
+        'Option Explicit',
+        "'* @brief BuildValue documentation.",
+        'Public Function BuildValue() As String',
+        '    BuildValue = "BuildValue"',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        "' BuildValue is an ordinary comment.",
+        'Public Sub Run()',
+        '    Dim text As String',
+        '    text = "BuildValue"',
+        '    BuildValue',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const edits = getRenameEdits(
+    project,
+    {
+      uri: 'file:///project/Caller.bas',
+      position: { line: 6, character: 8 }
+    },
+    'MakeValue'
+  );
+
+  assert.deepEqual(edits, [
+    {
+      uri: 'file:///project/Builder.bas',
+      range: {
+        start: { line: 3, character: 16 },
+        end: { line: 3, character: 26 }
+      },
+      newText: 'MakeValue'
+    },
+    {
+      uri: 'file:///project/Builder.bas',
+      range: {
+        start: { line: 4, character: 4 },
+        end: { line: 4, character: 14 }
+      },
+      newText: 'MakeValue'
+    },
+    {
+      uri: 'file:///project/Caller.bas',
+      range: {
+        start: { line: 6, character: 4 },
+        end: { line: 6, character: 14 }
+      },
+      newText: 'MakeValue'
+    }
+  ]);
+});
+
+test('rename supports local variables and parameters', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run(ByVal oldName As String)',
+        '    Dim localValue As String',
+        '    localValue = oldName',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(
+    getRenameEdits(
+      project,
+      {
+        uri: 'file:///project/Worker.bas',
+        position: { line: 5, character: 20 }
+      },
+      'newName'
+    ),
+    [
+      {
+        uri: 'file:///project/Worker.bas',
+        range: {
+          start: { line: 3, character: 21 },
+          end: { line: 3, character: 28 }
+        },
+        newText: 'newName'
+      },
+      {
+        uri: 'file:///project/Worker.bas',
+        range: {
+          start: { line: 5, character: 17 },
+          end: { line: 5, character: 24 }
+        },
+        newText: 'newName'
+      }
+    ]
+  );
+  assert.deepEqual(
+    getRenameEdits(
+      project,
+      {
+        uri: 'file:///project/Worker.bas',
+        position: { line: 5, character: 8 }
+      },
+      'nextValue'
+    ),
+    [
+      {
+        uri: 'file:///project/Worker.bas',
+        range: {
+          start: { line: 4, character: 8 },
+          end: { line: 4, character: 18 }
+        },
+        newText: 'nextValue'
+      },
+      {
+        uri: 'file:///project/Worker.bas',
+        range: {
+          start: { line: 5, character: 4 },
+          end: { line: 5, character: 14 }
+        },
+        newText: 'nextValue'
+      }
+    ]
+  );
+});
+
+test('rename supports properties, enums, user-defined types, and events', () => {
+  const property_project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Customer.DisplayName',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        'Public Property Get DisplayName() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+  const enum_type_project = buildVbaProject([
+    {
+      uri: 'file:///project/Model.bas',
+      text: [
+        'Attribute VB_Name = "Model"',
+        'Option Explicit',
+        'Public Enum CustomerState',
+        '    Active',
+        'End Enum',
+        'Public Type CustomerRecord',
+        '    State As CustomerState',
+        'End Type',
+        'Public Sub Run()',
+        '    Dim state As CustomerState',
+        '    Dim record As CustomerRecord',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+  const event_project = buildVbaProject([
+    {
+      uri: 'file:///project/Publisher.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Publisher"',
+        'Option Explicit',
+        'Public Event Completed(ByVal Result As String)',
+        'Public Sub Run()',
+        '    RaiseEvent Completed("ok")',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getRenameEdits(
+    property_project,
+    {
+      uri: 'file:///project/Caller.bas',
+      position: { line: 4, character: 16 }
+    },
+    'NameText'
+  ), [
+    {
+      uri: 'file:///project/Caller.bas',
+      range: {
+        start: { line: 4, character: 13 },
+        end: { line: 4, character: 24 }
+      },
+      newText: 'NameText'
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      range: {
+        start: { line: 4, character: 20 },
+        end: { line: 4, character: 31 }
+      },
+      newText: 'NameText'
+    }
+  ]);
+  assert.deepEqual(getRenameEdits(
+    enum_type_project,
+    {
+      uri: 'file:///project/Model.bas',
+      position: { line: 2, character: 18 }
+    },
+    'CustomerStatus'
+  ), [
+    {
+      uri: 'file:///project/Model.bas',
+      range: {
+        start: { line: 2, character: 12 },
+        end: { line: 2, character: 25 }
+      },
+      newText: 'CustomerStatus'
+    },
+    {
+      uri: 'file:///project/Model.bas',
+      range: {
+        start: { line: 6, character: 13 },
+        end: { line: 6, character: 26 }
+      },
+      newText: 'CustomerStatus'
+    },
+    {
+      uri: 'file:///project/Model.bas',
+      range: {
+        start: { line: 9, character: 17 },
+        end: { line: 9, character: 30 }
+      },
+      newText: 'CustomerStatus'
+    }
+  ]);
+  assert.deepEqual(getRenameEdits(
+    enum_type_project,
+    {
+      uri: 'file:///project/Model.bas',
+      position: { line: 5, character: 18 }
+    },
+    'CustomerSnapshot'
+  ), [
+    {
+      uri: 'file:///project/Model.bas',
+      range: {
+        start: { line: 5, character: 12 },
+        end: { line: 5, character: 26 }
+      },
+      newText: 'CustomerSnapshot'
+    },
+    {
+      uri: 'file:///project/Model.bas',
+      range: {
+        start: { line: 10, character: 18 },
+        end: { line: 10, character: 32 }
+      },
+      newText: 'CustomerSnapshot'
+    }
+  ]);
+  assert.deepEqual(getRenameEdits(
+    event_project,
+    {
+      uri: 'file:///project/Publisher.cls',
+      position: { line: 5, character: 18 }
+    },
+    'Finished'
+  ), [
+    {
+      uri: 'file:///project/Publisher.cls',
+      range: {
+        start: { line: 3, character: 13 },
+        end: { line: 3, character: 22 }
+      },
+      newText: 'Finished'
+    },
+    {
+      uri: 'file:///project/Publisher.cls',
+      range: {
+        start: { line: 5, character: 15 },
+        end: { line: 5, character: 24 }
+      },
+      newText: 'Finished'
+    }
+  ]);
+});
+
+test('rename excludes HostDefinitions and ambiguous references', () => {
+  const host_project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    Range',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+  const ambiguous_project = buildVbaProject([
+    {
+      uri: 'file:///project/FirstBuilder.bas',
+      text: [
+        'Attribute VB_Name = "FirstBuilder"',
+        'Option Explicit',
+        '',
+        'Public Function BuildValue() As String',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/SecondBuilder.bas',
+      text: [
+        'Attribute VB_Name = "SecondBuilder"',
+        'Option Explicit',
+        '',
+        'Public Function BuildValue() As String',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    BuildValue',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getRenameEdits(
+    host_project,
+    {
+      uri: 'file:///project/Caller.bas',
+      position: { line: 4, character: 8 }
+    },
+    'Cells'
+  ), []);
+  assert.deepEqual(getRenameEdits(
+    ambiguous_project,
+    {
+      uri: 'file:///project/FirstBuilder.bas',
+      position: { line: 3, character: 20 }
+    },
+    'MakeValue'
+  ), [
+    {
+      uri: 'file:///project/FirstBuilder.bas',
+      range: {
+        start: { line: 3, character: 16 },
+        end: { line: 3, character: 26 }
+      },
+      newText: 'MakeValue'
+    }
+  ]);
 });
 
 test('completion includes a Public Function from a sibling module in the same VbaProject', () => {

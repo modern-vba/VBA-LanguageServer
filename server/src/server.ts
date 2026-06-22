@@ -11,10 +11,13 @@ import {
   ParameterInformation,
   Position,
   ProposedFeatures,
+  Range,
   SignatureHelp,
   SignatureInformation,
+  TextEdit,
   TextDocumentSyncKind,
-  TextDocuments
+  TextDocuments,
+  WorkspaceEdit
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import fs from 'node:fs';
@@ -26,7 +29,11 @@ import {
   getCompletions,
   getDefinition,
   getHover,
+  getRenameEdits,
+  getRenameTarget,
   getSignatureHelp,
+  RenameEdit,
+  SourceRange,
   VbaProjectFile
 } from './vbaProject';
 
@@ -42,6 +49,9 @@ connection.onInitialize((_params: InitializeParams): InitializeResult => {
       },
       definitionProvider: true,
       hoverProvider: true,
+      renameProvider: {
+        prepareProvider: true
+      },
       signatureHelpProvider: {
         triggerCharacters: ['(', ',']
       }
@@ -102,6 +112,39 @@ connection.onDefinition((params): Definition | undefined => {
     start: toLspPosition(definition.range.start),
     end: toLspPosition(definition.range.end)
   });
+});
+
+connection.onPrepareRename((params): Range | undefined => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return undefined;
+  }
+
+  const project = buildProjectForDocument(document);
+  const target = getRenameTarget(project, {
+    uri: document.uri,
+    position: params.position
+  });
+  return target === undefined ? undefined : toLspRange(target.range);
+});
+
+connection.onRenameRequest((params): WorkspaceEdit => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return {};
+  }
+
+  const project = buildProjectForDocument(document);
+  const edits = getRenameEdits(
+    project,
+    {
+      uri: document.uri,
+      position: params.position
+    },
+    params.newName
+  );
+
+  return toWorkspaceEdit(edits);
 });
 
 connection.onHover((params): Hover | undefined => {
@@ -203,4 +246,18 @@ function buildProjectForDocument(document: TextDocument): ReturnType<typeof buil
 
 function toLspPosition(position: Position): Position {
   return Position.create(position.line, position.character);
+}
+
+function toLspRange(range: SourceRange): Range {
+  return Range.create(toLspPosition(range.start), toLspPosition(range.end));
+}
+
+function toWorkspaceEdit(edits: RenameEdit[]): WorkspaceEdit {
+  const changes: NonNullable<WorkspaceEdit['changes']> = {};
+  for (const edit of edits) {
+    changes[edit.uri] ??= [];
+    changes[edit.uri].push(TextEdit.replace(toLspRange(edit.range), edit.newText));
+  }
+
+  return { changes };
 }

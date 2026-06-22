@@ -41,6 +41,12 @@ export interface DefinitionLocation {
   range: SourceRange;
 }
 
+export interface RenameEdit {
+  uri: string;
+  range: SourceRange;
+  newText: string;
+}
+
 export interface HoverResult {
   contents: string;
 }
@@ -297,6 +303,49 @@ export function getRenameTarget(
 ): DefinitionLocation | undefined {
   const resolution = resolveName(project, request);
   return resolution?.source === 'vba' ? resolution.definition : undefined;
+}
+
+export function getRenameEdits(
+  project: VbaProject,
+  request: CompletionRequest,
+  newName: string
+): RenameEdit[] {
+  if (!isIdentifierName(newName)) {
+    return [];
+  }
+
+  const target = getRenameTarget(project, request);
+  if (target === undefined) {
+    return [];
+  }
+
+  const target_module = findModule(project, target.uri);
+  if (target_module === undefined) {
+    return [];
+  }
+
+  const edits: RenameEdit[] = [];
+  for (const module of project.modules.filter((candidate) =>
+    candidate.folderUri.toLowerCase() === target_module.folderUri.toLowerCase()
+  )) {
+    for (let line_index = 0; line_index < module.lines.length; line_index += 1) {
+      for (const range of getIdentifierRangesInCode(module.lines[line_index], line_index)) {
+        const resolution = resolveName(project, {
+          uri: module.uri,
+          position: range.start
+        });
+        if (resolution?.source === 'vba' && sameDefinitionLocation(resolution.definition, target)) {
+          edits.push({
+            uri: module.uri,
+            range,
+            newText: newName
+          });
+        }
+      }
+    }
+  }
+
+  return edits;
 }
 
 export function resolveName(
@@ -1002,6 +1051,55 @@ function getIdentifierAt(lines: string[], position: SourcePosition): string | un
   return undefined;
 }
 
+function getIdentifierRangesInCode(line: string, lineIndex: number): SourceRange[] {
+  const ranges: SourceRange[] = [];
+  let character_index = 0;
+  let is_in_string = false;
+
+  while (character_index < line.length) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+        } else {
+          is_in_string = false;
+          character_index += 1;
+        }
+      } else {
+        character_index += 1;
+      }
+      continue;
+    }
+
+    if (character === "'") {
+      break;
+    }
+    if (character === '"') {
+      is_in_string = true;
+      character_index += 1;
+      continue;
+    }
+
+    if (isIdentifierStart(character)) {
+      const start = character_index;
+      character_index += 1;
+      while (character_index < line.length && isIdentifierPart(line[character_index])) {
+        character_index += 1;
+      }
+      ranges.push({
+        start: { line: lineIndex, character: start },
+        end: { line: lineIndex, character: character_index }
+      });
+      continue;
+    }
+
+    character_index += 1;
+  }
+
+  return ranges;
+}
+
 function getQualifiedReferenceAt(
   lines: string[],
   position: SourcePosition
@@ -1092,6 +1190,24 @@ function sameUri(left: string, right: string): boolean {
 
 function sameName(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
+}
+
+function sameDefinitionLocation(left: DefinitionLocation, right: DefinitionLocation): boolean {
+  return sameUri(left.uri, right.uri)
+    && comparePosition(left.range.start, right.range.start) === 0
+    && comparePosition(left.range.end, right.range.end) === 0;
+}
+
+function isIdentifierName(value: string): boolean {
+  return new RegExp(`^${C_IDENTIFIER_PATTERN.source}$`).test(value);
+}
+
+function isIdentifierStart(character: string): boolean {
+  return /[A-Za-z_]/.test(character);
+}
+
+function isIdentifierPart(character: string): boolean {
+  return /[A-Za-z0-9_]/.test(character);
 }
 
 function singleMatch<T>(items: T[]): T | undefined {
