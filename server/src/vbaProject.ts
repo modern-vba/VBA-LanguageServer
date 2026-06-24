@@ -202,12 +202,14 @@ interface MemberChainSegment {
 interface MemberChainExpression {
   segments: MemberChainSegment[];
   targetSegmentIndex: number;
+  usesWithReceiver?: boolean;
 }
 
 interface MemberCompletionRequest {
   qualifier: string;
   prefix: string;
   receiverChain?: MemberChainExpression;
+  usesWithReceiver?: boolean;
 }
 
 interface CallExpression {
@@ -427,15 +429,23 @@ function getTypedMemberCompletions(
   if (request.receiverChain !== undefined) {
     const type_ref = resolveMemberChainReceiverType(project, currentModule, position, request.receiverChain);
     if (type_ref !== undefined) {
-      const prefix = request.prefix.toLowerCase();
-      return getMembersForResolvedType(project, currentModule, type_ref)
-        .filter((member) => prefix === '' || member.name.toLowerCase().startsWith(prefix))
-        .map((member) => ({
-          label: member.name,
-          kind: member.kind,
-          detail: member.detail
-        }));
+      return completionEntriesForResolvedMembers(
+        getMembersForResolvedType(project, currentModule, type_ref),
+        request.prefix
+      );
     }
+  }
+
+  if (request.usesWithReceiver === true) {
+    const type_ref = resolveActiveWithReceiverType(project, currentModule, position);
+    if (type_ref !== undefined) {
+      return completionEntriesForResolvedMembers(
+        getMembersForResolvedType(project, currentModule, type_ref),
+        request.prefix
+      );
+    }
+
+    return [];
   }
 
   const type_name = findTypeNameForExpression(project, currentModule, position, request.qualifier);
@@ -443,9 +453,19 @@ function getTypedMemberCompletions(
     return [];
   }
 
-  const prefix = request.prefix.toLowerCase();
-  return getMembersForType(project, currentModule, type_name)
-    .filter((member) => prefix === '' || member.name.toLowerCase().startsWith(prefix))
+  return completionEntriesForResolvedMembers(
+    getMembersForType(project, currentModule, type_name),
+    request.prefix
+  );
+}
+
+function completionEntriesForResolvedMembers(
+  members: { name: string; kind: CompletionEntryKind; detail?: string }[],
+  prefix: string
+): CompletionEntry[] {
+  const normalized_prefix = prefix.toLowerCase();
+  return members
+    .filter((member) => normalized_prefix === '' || member.name.toLowerCase().startsWith(normalized_prefix))
     .map((member) => ({
       label: member.name,
       kind: member.kind,
@@ -696,7 +716,10 @@ export function resolveName(
   }
 
   const member_chain = getMemberChainExpressionAt(current_module.lines, request.position);
-  if (member_chain !== undefined && member_chain.segments.length > 1) {
+  if (
+    member_chain !== undefined
+    && (member_chain.segments.length > 1 || member_chain.usesWithReceiver === true)
+  ) {
     return resolveMemberChainTarget(project, current_module, request.position, member_chain);
   }
 
@@ -1550,7 +1573,14 @@ function getMemberCompletionAt(
 
   const receiver_chain = parseMemberChainEndingAt(line, position.line, dot_index);
   if (receiver_chain === undefined) {
-    return undefined;
+    const leading_dot = findPreviousNonWhitespace(line, dot_index - 1) === undefined;
+    return leading_dot
+      ? {
+          qualifier: '',
+          prefix,
+          usesWithReceiver: true
+        }
+      : undefined;
   }
 
   const qualifier_start = receiver_chain.segments[0].range.start.character;
@@ -1600,8 +1630,16 @@ function parseMemberChainEndingBefore(
     ? undefined
     : {
         segments: selected.segments,
-        targetSegmentIndex: selected.segments.length - 1
+        targetSegmentIndex: selected.segments.length - 1,
+        usesWithReceiver: isLeadingDotChain(line, selected.segments[0].range.start.character)
       };
+}
+
+function isLeadingDotChain(line: string, firstSegmentStart: number): boolean {
+  const dot_index = findPreviousNonWhitespace(line, firstSegmentStart - 1);
+  return dot_index !== undefined
+    && line[dot_index] === '.'
+    && findPreviousNonWhitespace(line, dot_index - 1) === undefined;
 }
 
 function getMemberChainExpressionAt(
@@ -1628,7 +1666,8 @@ function getMemberChainExpressionAt(
     ? undefined
     : {
         segments: chain.segments,
-        targetSegmentIndex: target_segment_index
+        targetSegmentIndex: target_segment_index,
+        usesWithReceiver: chain.usesWithReceiver
       };
 }
 
@@ -1950,6 +1989,106 @@ function resolveMemberChainTarget(
   return resolved_segments?.at(-1)?.resolution;
 }
 
+function resolveActiveWithReceiverType(
+  project: VbaProject,
+  currentModule: VbaModule,
+  position: SourcePosition
+): TypeResolutionRef | undefined {
+  const current_member = currentModule.moduleMembers.find((member) =>
+    containsPosition(member.range, position)
+  );
+  if (current_member === undefined) {
+    return undefined;
+  }
+
+  const receiver_stack: Array<TypeResolutionRef | undefined> = [];
+  for (let line_index = current_member.range.start.line; line_index < position.line; line_index += 1) {
+    const line = currentModule.lines[line_index] ?? '';
+    const structure_text = getCodeTextForStructure(line).trim();
+    if (structure_text === '') {
+      continue;
+    }
+
+    if (/^End\s+With\b/i.test(structure_text)) {
+      receiver_stack.pop();
+      continue;
+    }
+
+    if (/^With\b/i.test(structure_text)) {
+      const receiver_chain = getWithReceiverChainAt(line, line_index);
+      const receiver_type = receiver_chain === undefined
+        ? undefined
+        : resolveMemberChainReceiverType(project, currentModule, {
+          line: line_index,
+          character: getCodeEndCharacter(line)
+        }, receiver_chain);
+      receiver_stack.push(receiver_type);
+    }
+  }
+
+  return receiver_stack.at(-1);
+}
+
+function getWithReceiverChainAt(line: string, lineIndex: number): MemberChainExpression | undefined {
+  const code_text = getCodeTextForStructure(line);
+  const with_match = /^\s*With\b/i.exec(code_text);
+  if (with_match === null) {
+    return undefined;
+  }
+
+  const code_end = getCodeEndCharacter(line);
+  let receiver_start = skipWhitespace(line, with_match[0].length, code_end);
+  let uses_with_receiver = false;
+  if (line[receiver_start] === '.') {
+    uses_with_receiver = true;
+    receiver_start = skipWhitespace(line, receiver_start + 1, code_end);
+  }
+
+  const receiver_chain = parseMemberChainFrom(line, lineIndex, receiver_start, code_end);
+  if (receiver_chain === undefined || receiver_chain.endIndex !== code_end) {
+    return undefined;
+  }
+
+  return {
+    segments: receiver_chain.segments,
+    targetSegmentIndex: receiver_chain.segments.length - 1,
+    usesWithReceiver: uses_with_receiver
+  };
+}
+
+function getCodeEndCharacter(line: string): number {
+  let character_index = 0;
+  let is_in_string = false;
+
+  while (character_index < line.length) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+        } else {
+          is_in_string = false;
+          character_index += 1;
+        }
+      } else {
+        character_index += 1;
+      }
+      continue;
+    }
+
+    if (character === "'") {
+      return character_index;
+    }
+    if (character === '"') {
+      is_in_string = true;
+    }
+
+    character_index += 1;
+  }
+
+  return line.length;
+}
+
 function resolveMemberChain(
   project: VbaProject,
   currentModule: VbaModule,
@@ -1965,7 +2104,14 @@ function resolveMemberChain(
   let current_type_ref: TypeResolutionRef | undefined;
   let segment_index = 0;
 
-  if (segments.length > 1) {
+  if (chain.usesWithReceiver === true) {
+    current_type_ref = resolveActiveWithReceiverType(project, currentModule, position);
+    if (current_type_ref === undefined) {
+      return undefined;
+    }
+  }
+
+  if (chain.usesWithReceiver !== true && segments.length > 1) {
     const source_qualified_member = resolveQualifiedModuleDefinition(
       project,
       currentModule,
@@ -1991,7 +2137,7 @@ function resolveMemberChain(
     }
   }
 
-  if (segment_index === 0) {
+  if (chain.usesWithReceiver !== true && segment_index === 0) {
     const root_segment = resolveRootChainSegment(project, currentModule, position, segments[0]);
     if (root_segment === undefined) {
       return undefined;

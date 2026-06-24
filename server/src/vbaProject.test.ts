@@ -797,6 +797,293 @@ test('Excel host member chains use declared return types for completion', () => 
   );
 });
 
+test('WithReceiver enables leading-dot completion for host member chains', () => {
+  const chain_line = '    .Fi';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With Application.ActiveWorkbook.Worksheets(1).Range("A1")',
+        chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: chain_line.length }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Find', detail: 'Excel.Find' }]
+  );
+});
+
+test('WithReceiver returns receiver members for bare leading-dot completion', () => {
+  const chain_line = '    .';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With Application.ActiveWorkbook.Worksheets(1).Range("A1")',
+        chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: chain_line.length }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [
+      { label: 'Address', detail: 'Excel.Address' },
+      { label: 'Value', detail: 'Excel.Value' },
+      { label: 'Value2', detail: 'Excel.Value2' },
+      { label: 'Find', detail: 'Excel.Find' }
+    ]
+  );
+});
+
+test('nested WithReceiver uses the nearest active receiver for leading-dot completion', () => {
+  const chain_line = '            .Fi';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With Application.ActiveWorkbook.Worksheets(1).Range("A1")',
+        '        With .Find("needle")',
+        chain_line,
+        '        End With',
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 6, character: chain_line.length }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Find', detail: 'Excel.Find' }]
+  );
+});
+
+test('WithReceiver host members provide hover but not definition or rename targets', () => {
+  const chain_line = '    .Find';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With Application.ActiveWorkbook.Worksheets(1).Range("A1")',
+        chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+  const request = {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: chain_line.length - 2 }
+  };
+
+  assert.deepEqual(getHover(project, request), {
+    contents: 'Excel.Find\n\nFinds specific information in a range.'
+  });
+  assert.equal(getDefinition(project, request), undefined);
+  assert.equal(getRenameTarget(project, request), undefined);
+});
+
+test('WithReceiver resolves source members reached through leading-dot chains', () => {
+  const chain_line = '    .Address.City';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With CustomerFactory.CreateCustomer()',
+        chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerFactory.bas',
+      text: [
+        'Attribute VB_Name = "CustomerFactory"',
+        'Option Explicit',
+        '',
+        'Public Function CreateCustomer() As Customer',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        'Public Property Get Address() As CustomerAddress',
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerAddress.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CustomerAddress"',
+        'Option Explicit',
+        '',
+        "'* @brief City documentation.",
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Order.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Order"',
+        'Option Explicit',
+        '',
+        'Public Property Get Address() As OrderAddress',
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/OrderAddress.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "OrderAddress"',
+        'Option Explicit',
+        '',
+        "'* @brief Order city documentation.",
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+  const request = {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: chain_line.length - 2 }
+  };
+
+  assert.deepEqual(getHover(project, request), {
+    contents: 'City documentation.'
+  });
+  assert.deepEqual(getDefinition(project, request), {
+    uri: 'file:///project/CustomerAddress.cls',
+    range: {
+      start: { line: 5, character: 20 },
+      end: { line: 5, character: 24 }
+    }
+  });
+  assert.deepEqual(getRenameTarget(project, request), {
+    uri: 'file:///project/CustomerAddress.cls',
+    range: {
+      start: { line: 5, character: 20 },
+      end: { line: 5, character: 24 }
+    }
+  });
+});
+
+test('WithReceiver fails closed for missing and ambiguous receiver types', () => {
+  const missing_type_line = '        .Dis';
+  const ambiguous_type_line = '        .Ci';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Function CreateCustomer()',
+        'End Function',
+        '',
+        'Public Function CreateCustomerWithAmbiguousAddress() As Customer',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    With CreateCustomer()',
+        missing_type_line,
+        '    End With',
+        '',
+        '    With CreateCustomerWithAmbiguousAddress().Address',
+        ambiguous_type_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        'Public Property Get DisplayName() As String',
+        'End Property',
+        '',
+        'Public Property Get Address() As CustomerAddress',
+        'End Property',
+        '',
+        'Public Function Address() As CustomerAddress',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerAddress.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CustomerAddress"',
+        'Option Explicit',
+        '',
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 11, character: missing_type_line.length }
+  }), []);
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 15, character: ambiguous_type_line.length }
+  }), []);
+});
+
 test('host members reached through member chains provide hover but not definition or rename targets', () => {
   const chain_line = '    Application.ActiveWorkbook.Worksheets(1).Range("A1").Find';
   const project = buildVbaProject([
@@ -2750,6 +3037,37 @@ test('signature help resolves host methods reached through member chains', () =>
   });
 });
 
+test('signature help resolves host methods reached through WithReceiver leading-dot chains', () => {
+  const chain_line = '        .Find("needle", ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With Application.ActiveWorkbook.Worksheets(1).Range("A1")',
+        chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: chain_line.length }
+  });
+
+  assert.equal(
+    signatureHelp?.label,
+    'Find(What, Optional After, Optional LookIn, Optional LookAt, Optional SearchOrder, Optional SearchDirection, Optional MatchCase, Optional MatchByte, Optional SearchFormat) As Range'
+  );
+  assert.equal(signatureHelp?.activeParameter, 1);
+  assert.equal(signatureHelp?.documentation, 'Finds specific information in a range.');
+});
+
 test('signature help resolves source methods reached through member chains', () => {
   const chain_line = '    CustomerFactory.CreateCustomer().LookupOrder("A001", ';
   const project = buildVbaProject([
@@ -2801,6 +3119,76 @@ test('signature help resolves source methods reached through member chains', () 
     documentation: 'Looks up an order.\n\n@return Order name.',
     parameters: [
       { label: 'Key', documentation: 'Order key.' },
+      { label: 'Optional Fallback', documentation: 'String Optional. Default: "n/a".' }
+    ]
+  });
+});
+
+test('signature help resolves source methods reached through WithReceiver leading-dot chains', () => {
+  const chain_line = '        .LookupOrder("A001", ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With CustomerFactory.CreateCustomer()',
+        chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerFactory.bas',
+      text: [
+        'Attribute VB_Name = "CustomerFactory"',
+        'Option Explicit',
+        '',
+        'Public Function CreateCustomer() As Customer',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        "'* @brief Looks up a customer order.",
+        "'* @param Key Customer order key.",
+        "'* @return Customer order name.",
+        'Public Function LookupOrder(ByVal Key As String, Optional ByVal Fallback As String = "n/a") As String',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Order.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Order"',
+        'Option Explicit',
+        '',
+        "'* @brief Looks up a standalone order.",
+        'Public Function LookupOrder(ByVal Key As String, Optional ByVal Fallback As String = "n/a") As String',
+        'End Function'
+      ].join('\n')
+    }
+  ]);
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 5, character: chain_line.length }
+  });
+
+  assert.deepEqual(signatureHelp, {
+    label: 'LookupOrder(Key, Optional Fallback) As String',
+    activeParameter: 1,
+    documentation: 'Looks up a customer order.\n\n@return Customer order name.',
+    parameters: [
+      { label: 'Key', documentation: 'Customer order key.' },
       { label: 'Optional Fallback', documentation: 'String Optional. Default: "n/a".' }
     ]
   });

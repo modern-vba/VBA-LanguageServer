@@ -93,6 +93,10 @@ _Avoid_: type inference, runtime type, guessed type
 The process of resolving a sequence of member accesses by carrying each resolved member's declared result type to the next member access. It applies to both source `VbaDefinition`s and host `HostDefinition`s when result type metadata is available; missing or ambiguous result types stop the chain.
 _Avoid_: host chain resolution, dotted lookup, chained lookup
 
+**WithReceiver**:
+The nearest active `With ... End With` expression that supplies the implicit receiver for a leading-dot member chain. Nested `With` blocks use the innermost active `WithReceiver`; missing or ambiguous receiver types do not produce guessed member results.
+_Avoid_: with context, current object, implicit type
+
 **QualifiedReference**:
 An identifier reference written with a qualifier, such as `ModuleIdentity.MemberName`, `variable.MemberName`, or `Word.Application`. When the qualifier names a module, class, or form, only public members of that definition are visible from outside that module; when it names an enabled `HostApplication`, only that host's `HostDefinition`s are visible.
 _Avoid_: dotted lookup, member access, qualified symbol
@@ -179,6 +183,9 @@ Domain Expert: "No. That is `MemberChainResolution`: each resolved member's decl
 
 Dev: "Can `Me.CreateCustomer().DisplayName` participate in `MemberChainResolution`?"
 Domain Expert: "Yes, inside class and form modules. `Me` is the current instance root, and private members remain visible within that same module."
+
+Dev: "Inside `With Application.ActiveWorkbook.Worksheets(1).Range(\"A1\")`, what does `.Find` mean?"
+Domain Expert: "The `WithReceiver` is the resolved range expression, so `.Find` is resolved as a member chain on that receiver. If the `WithReceiver` type is missing or ambiguous, no guessed member result is produced."
 
 Dev: "Should `Constructor.New_Foo` resolve across modules?"
 Domain Expert: "Yes. It is a `QualifiedReference`; after `Constructor` resolves to a `ModuleIdentity`, `New_Foo` resolves to a public member in that module."
