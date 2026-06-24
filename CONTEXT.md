@@ -98,7 +98,7 @@ A `MemberChainResolution` expression written across multiple physical VBA lines 
 _Avoid_: logical line, multiline chain, wrapped chain
 
 **WithReceiver**:
-The nearest active `With ... End With` expression that supplies the implicit receiver for a leading-dot member chain that is not part of a `ContinuedMemberChain`. Nested `With` blocks use the innermost active `WithReceiver`; missing or ambiguous receiver types do not produce guessed member results.
+The nearest active `With ... End With` expression that supplies the implicit receiver for a leading-dot member chain that is not part of a `ContinuedMemberChain`. Its receiver expression may itself be a `ContinuedMemberChain`; nested `With` blocks use the innermost active `WithReceiver`, and missing or ambiguous receiver types do not produce guessed member results.
 _Avoid_: with context, current object, implicit type
 
 **QualifiedReference**:
@@ -193,6 +193,9 @@ Domain Expert: "No. It is a `ContinuedMemberChain`: one `MemberChainResolution` 
 
 Dev: "Inside `With Application.ActiveWorkbook.Worksheets(1).Range(\"A1\")`, what does `.Find` mean?"
 Domain Expert: "The `WithReceiver` is the resolved range expression, so `.Find` is resolved as a member chain on that receiver. If the `WithReceiver` type is missing or ambiguous, no guessed member result is produced."
+
+Dev: "Can the `WithReceiver` expression itself be split across physical lines?"
+Domain Expert: "Yes. The receiver expression can be a `ContinuedMemberChain`; once that receiver resolves, leading-dot members inside the block still use the `WithReceiver`."
 
 Dev: "Should `Constructor.New_Foo` resolve across modules?"
 Domain Expert: "Yes. It is a `QualifiedReference`; after `Constructor` resolves to a `ModuleIdentity`, `New_Foo` resolves to a public member in that module."

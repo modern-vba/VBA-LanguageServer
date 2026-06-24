@@ -976,6 +976,37 @@ test('WithReceiver enables leading-dot completion for host member chains', () =>
   );
 });
 
+test('continued WithReceiver enables leading-dot completion for host member chains', () => {
+  const chain_line = '        .Fi';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With Application.ActiveWorkbook _',
+        '        .Worksheets(1) _',
+        '        .Range("A1")',
+        chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 7, character: chain_line.length }
+  });
+
+  assert.deepEqual(
+    completions.map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Find', detail: 'Excel.Find' }]
+  );
+});
+
 test('WithReceiver returns receiver members for bare leading-dot completion', () => {
   const chain_line = '    .';
   const project = buildVbaProject([
@@ -1041,6 +1072,132 @@ test('nested WithReceiver uses the nearest active receiver for leading-dot compl
   );
 });
 
+test('nested continued WithReceiver uses the outer receiver and pops back after End With', () => {
+  const inner_chain_line = '            .Nu';
+  const outer_chain_line = '        .Na';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With CustomerFactory.CreateCustomer()',
+        '        With .Address _',
+        '            .PrimaryOrder()',
+        inner_chain_line,
+        '        End With',
+        outer_chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerFactory.bas',
+      text: [
+        'Attribute VB_Name = "CustomerFactory"',
+        'Option Explicit',
+        '',
+        'Public Function CreateCustomer() As Customer',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        'Public Property Get Address() As CustomerAddress',
+        'End Property',
+        '',
+        'Public Property Get Name() As String',
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerAddress.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CustomerAddress"',
+        'Option Explicit',
+        '',
+        'Public Function PrimaryOrder() As Order',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Order.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Order"',
+        'Option Explicit',
+        '',
+        'Public Property Get Number() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 7, character: inner_chain_line.length }
+  }).map((item) => item.label), ['Number']);
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 9, character: outer_chain_line.length }
+  }).map((item) => item.label), ['Name']);
+});
+
+test('continued WithReceiver declaration lines do not use the outer receiver as body', () => {
+  const declaration_line = '            .Ci';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With CustomerFactory.CreateCustomer()',
+        '        With MissingReceiver _',
+        declaration_line,
+        '        End With',
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerFactory.bas',
+      text: [
+        'Attribute VB_Name = "CustomerFactory"',
+        'Option Explicit',
+        '',
+        'Public Function CreateCustomer() As Customer',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 6, character: declaration_line.length }
+  }), []);
+});
+
 test('WithReceiver host members provide hover but not definition or rename targets', () => {
   const chain_line = '    .Find';
   const project = buildVbaProject([
@@ -1068,6 +1225,45 @@ test('WithReceiver host members provide hover but not definition or rename targe
   });
   assert.equal(getDefinition(project, request), undefined);
   assert.equal(getRenameTarget(project, request), undefined);
+});
+
+test('continued WithReceiver host members provide hover and signature help', () => {
+  const chain_line = '        .Find("needle", ';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With Application.ActiveWorkbook _',
+        '        .Worksheets(1) _',
+        '        .Range("A1")',
+        chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getHover(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 7, character: 12 }
+  }), {
+    contents: 'Excel.Find\n\nFinds specific information in a range.'
+  });
+
+  const signatureHelp = getSignatureHelp(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 7, character: chain_line.length }
+  });
+  assert.equal(
+    signatureHelp?.label,
+    'Find(What, Optional After, Optional LookIn, Optional LookAt, Optional SearchOrder, Optional SearchDirection, Optional MatchCase, Optional MatchByte, Optional SearchFormat) As Range'
+  );
+  assert.equal(signatureHelp?.activeParameter, 1);
+  assert.equal(signatureHelp?.documentation, 'Finds specific information in a range.');
 });
 
 test('WithReceiver resolves source members reached through leading-dot chains', () => {
@@ -1167,6 +1363,74 @@ test('WithReceiver resolves source members reached through leading-dot chains', 
   });
 });
 
+test('continued WithReceiver resolves source member hover and definition', () => {
+  const chain_line = '        .Address.City';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With CustomerFactory _',
+        '        .CreateCustomer()',
+        chain_line,
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerFactory.bas',
+      text: [
+        'Attribute VB_Name = "CustomerFactory"',
+        'Option Explicit',
+        '',
+        'Public Function CreateCustomer() As Customer',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        'Public Property Get Address() As CustomerAddress',
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerAddress.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CustomerAddress"',
+        'Option Explicit',
+        '',
+        "'* @brief City documentation.",
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+  const request = {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 6, character: chain_line.length - 2 }
+  };
+
+  assert.deepEqual(getHover(project, request), {
+    contents: 'City documentation.'
+  });
+  assert.deepEqual(getDefinition(project, request), {
+    uri: 'file:///project/CustomerAddress.cls',
+    range: {
+      start: { line: 5, character: 20 },
+      end: { line: 5, character: 24 }
+    }
+  });
+});
+
 test('WithReceiver fails closed for missing and ambiguous receiver types', () => {
   const missing_type_line = '        .Dis';
   const ambiguous_type_line = '        .Ci';
@@ -1231,6 +1495,129 @@ test('WithReceiver fails closed for missing and ambiguous receiver types', () =>
   assert.deepEqual(getCompletions(project, {
     uri: 'file:///project/Caller.bas',
     position: { line: 15, character: ambiguous_type_line.length }
+  }), []);
+});
+
+test('continued WithReceiver fails closed for comment-continuation receiver declarations', () => {
+  const chain_line = '            .Ci';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With CustomerFactory.CreateCustomer()',
+        "        With .Address ' comment _",
+        chain_line,
+        '        End With',
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerFactory.bas',
+      text: [
+        'Attribute VB_Name = "CustomerFactory"',
+        'Option Explicit',
+        '',
+        'Public Function CreateCustomer() As Customer',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        'Public Property Get Address() As CustomerAddress',
+        'End Property',
+        '',
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerAddress.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CustomerAddress"',
+        'Option Explicit',
+        '',
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 6, character: chain_line.length }
+  }), []);
+});
+
+test('continued WithReceiver fails closed for invalid receiver continuations', () => {
+  const chain_line = '            .Ci';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Caller.bas',
+      text: [
+        'Attribute VB_Name = "Caller"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    With CustomerFactory.CreateCustomer()',
+        '        With .Address _',
+        '            .',
+        chain_line,
+        '        End With',
+        '    End With',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerFactory.bas',
+      text: [
+        'Attribute VB_Name = "CustomerFactory"',
+        'Option Explicit',
+        '',
+        'Public Function CreateCustomer() As Customer',
+        'End Function'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        '',
+        'Public Property Get Address() As CustomerAddress',
+        'End Property',
+        '',
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CustomerAddress.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CustomerAddress"',
+        'Option Explicit',
+        '',
+        'Public Property Get City() As String',
+        'End Property'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Caller.bas',
+    position: { line: 7, character: chain_line.length }
   }), []);
 });
 

@@ -224,6 +224,17 @@ interface LogicalSourceText {
   positions: SourcePosition[];
 }
 
+interface WithReceiverDeclaration {
+  chain?: MemberChainExpression;
+  end: SourcePosition;
+}
+
+interface WithReceiverSourceText extends LogicalSourceText {
+  endLine: number;
+  endCharacter: number;
+  hasCommentContinuation: boolean;
+}
+
 type TypeResolutionRef =
   | {
       source: 'vba';
@@ -2107,6 +2118,20 @@ function resolveMemberChainReceiverType(
   return resolved_segments?.at(-1)?.typeRef;
 }
 
+function resolveMemberChainReceiverTypeWithActiveReceiver(
+  project: VbaProject,
+  currentModule: VbaModule,
+  position: SourcePosition,
+  chain: MemberChainExpression,
+  activeWithReceiverType: TypeResolutionRef | undefined
+): TypeResolutionRef | undefined {
+  const resolved_segments = resolveMemberChain(project, currentModule, position, chain, {
+    activeWithReceiverType,
+    useActiveWithReceiverType: true
+  });
+  return resolved_segments?.at(-1)?.typeRef;
+}
+
 function resolveMemberChainTarget(
   project: VbaProject,
   currentModule: VbaModule,
@@ -2130,49 +2155,160 @@ function resolveActiveWithReceiverType(
   }
 
   const receiver_stack: Array<TypeResolutionRef | undefined> = [];
-  for (let line_index = current_member.range.start.line; line_index < position.line; line_index += 1) {
+  for (let line_index = current_member.range.start.line; line_index < position.line;) {
     const line = currentModule.lines[line_index] ?? '';
     const structure_text = getCodeTextForStructure(line).trim();
     if (structure_text === '') {
+      line_index += 1;
       continue;
     }
 
     if (/^End\s+With\b/i.test(structure_text)) {
       receiver_stack.pop();
+      line_index += 1;
       continue;
     }
 
     if (/^With\b/i.test(structure_text)) {
-      const receiver_chain = getWithReceiverChainAt(line, line_index);
+      const receiver_declaration = getWithReceiverDeclarationAt(currentModule.lines, line_index);
+      if (receiver_declaration === undefined) {
+        line_index += 1;
+        continue;
+      }
+      if (receiver_declaration.end.line >= position.line) {
+        break;
+      }
+
+      const receiver_chain = receiver_declaration.chain;
       const receiver_type = receiver_chain === undefined
         ? undefined
-        : resolveMemberChainReceiverType(project, currentModule, {
-          line: line_index,
-          character: getCodeEndCharacter(line)
-        }, receiver_chain);
+        : resolveMemberChainReceiverTypeWithActiveReceiver(
+          project,
+          currentModule,
+          receiver_declaration.end,
+          receiver_chain,
+          receiver_stack.at(-1)
+        );
       receiver_stack.push(receiver_type);
+      line_index = receiver_declaration.end.line + 1;
+      continue;
     }
+
+    line_index += 1;
   }
 
   return receiver_stack.at(-1);
 }
 
-function getWithReceiverChainAt(line: string, lineIndex: number): MemberChainExpression | undefined {
+function getWithReceiverDeclarationAt(lines: string[], lineIndex: number): WithReceiverDeclaration | undefined {
+  const line = lines[lineIndex] ?? '';
   const code_text = getCodeTextForStructure(line);
   const with_match = /^\s*With\b/i.exec(code_text);
   if (with_match === null) {
     return undefined;
   }
 
-  const code_end = getCodeEndCharacter(line);
-  let receiver_start = skipWhitespace(line, with_match[0].length, code_end);
-  let uses_with_receiver = false;
-  if (line[receiver_start] === '.') {
-    uses_with_receiver = true;
-    receiver_start = skipWhitespace(line, receiver_start + 1, code_end);
+  const first_line_end = getCodeContinuationMarkerStart(line) ?? getCodeEndCharacter(line);
+  const receiver_source = getWithReceiverSourceText(lines, lineIndex, with_match[0].length);
+  if (receiver_source === undefined) {
+    return {
+      end: { line: lineIndex, character: first_line_end }
+    };
+  }
+  if (receiver_source.hasCommentContinuation) {
+    return {
+      end: {
+        line: receiver_source.endLine,
+        character: receiver_source.endCharacter
+      }
+    };
   }
 
-  const receiver_chain = parseMemberChainFrom(line, lineIndex, receiver_start, code_end);
+  const receiver_chain = getWithReceiverChainFromSource(receiver_source);
+  return {
+    chain: receiver_chain,
+    end: {
+      line: receiver_source.endLine,
+      character: receiver_source.endCharacter
+    }
+  };
+}
+
+function getWithReceiverSourceText(
+  lines: string[],
+  lineIndex: number,
+  receiverStart: number
+): WithReceiverSourceText | undefined {
+  const text_parts: string[] = [];
+  const positions: SourcePosition[] = [];
+  let has_comment_continuation = false;
+
+  for (let current_line_index = lineIndex; current_line_index < lines.length; current_line_index += 1) {
+    const line = lines[current_line_index] ?? '';
+    const line_start = current_line_index === lineIndex ? receiverStart : 0;
+    const continuation_marker = getCodeContinuationMarkerStart(line);
+    const line_end = continuation_marker ?? getCodeEndCharacter(line);
+    has_comment_continuation = has_comment_continuation || hasCommentContinuationMarker(line);
+
+    text_parts.push(line.slice(line_start, line_end));
+    for (let character = line_start; character < line_end; character += 1) {
+      positions.push({ line: current_line_index, character });
+    }
+
+    if (continuation_marker === undefined) {
+      return {
+        text: text_parts.join(''),
+        positions,
+        endLine: current_line_index,
+        endCharacter: line_end,
+        hasCommentContinuation: has_comment_continuation
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function hasCommentContinuationMarker(line: string): boolean {
+  const code_end = getCodeEndCharacter(line);
+  if (code_end >= line.length) {
+    return false;
+  }
+
+  const marker_index = findPreviousNonWhitespace(line, line.length - 1);
+  return marker_index !== undefined
+    && marker_index > code_end
+    && line[marker_index] === '_'
+    && marker_index > 0
+    && /\s/.test(line[marker_index - 1]);
+}
+
+function getWithReceiverChainFromSource(
+  source: LogicalSourceText
+): MemberChainExpression | undefined {
+  const expression_end = findPreviousNonWhitespace(source.text, source.text.length - 1);
+  if (expression_end === undefined) {
+    return undefined;
+  }
+  if (source.text[expression_end] === '.') {
+    return undefined;
+  }
+
+  const code_end = expression_end + 1;
+  let receiver_start = skipWhitespace(source.text, 0, code_end);
+  let uses_with_receiver = false;
+  if (source.text[receiver_start] === '.') {
+    uses_with_receiver = true;
+    receiver_start = skipWhitespace(source.text, receiver_start + 1, code_end);
+  }
+
+  const receiver_chain = parseMemberChainFrom(
+    source.text,
+    source.positions[receiver_start]?.line ?? 0,
+    receiver_start,
+    code_end,
+    (start, end) => getLogicalSourceRange(source, start, end)
+  );
   if (receiver_chain === undefined || receiver_chain.endIndex !== code_end) {
     return undefined;
   }
@@ -2221,7 +2357,11 @@ function resolveMemberChain(
   project: VbaProject,
   currentModule: VbaModule,
   position: SourcePosition,
-  chain: MemberChainExpression
+  chain: MemberChainExpression,
+  options: {
+    activeWithReceiverType?: TypeResolutionRef;
+    useActiveWithReceiverType?: boolean;
+  } = {}
 ): ResolvedChainSegment[] | undefined {
   const resolved_segments: ResolvedChainSegment[] = [];
   const segments = chain.segments.slice(0, chain.targetSegmentIndex + 1);
@@ -2233,7 +2373,9 @@ function resolveMemberChain(
   let segment_index = 0;
 
   if (chain.usesWithReceiver === true) {
-    current_type_ref = resolveActiveWithReceiverType(project, currentModule, position);
+    current_type_ref = options.useActiveWithReceiverType === true
+      ? options.activeWithReceiverType
+      : resolveActiveWithReceiverType(project, currentModule, position);
     if (current_type_ref === undefined) {
       return undefined;
     }
