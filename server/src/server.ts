@@ -28,6 +28,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createDefaultHostCatalogManager } from './hostCatalogService';
 import { HostApplicationConfigurationProvider } from './hostApplicationSettings';
 import {
+  getClearDiagnosticsPayload,
+  getPublishDiagnosticsPayload
+} from './diagnostics';
+import {
   buildVbaProject,
   CompletionEntryKind,
   getCompletions,
@@ -84,17 +88,11 @@ connection.onInitialized((): void => {
 });
 
 documents.onDidChangeContent((change): void => {
-  connection.sendDiagnostics({
-    diagnostics: [],
-    uri: change.document.uri
-  });
+  void publishDiagnosticsForDocument(change.document);
 });
 
 documents.onDidClose((event): void => {
-  connection.sendDiagnostics({
-    diagnostics: [],
-    uri: event.document.uri
-  });
+  connection.sendDiagnostics(getClearDiagnosticsPayload(event.document.uri));
 });
 
 connection.onCompletion(async (params): Promise<CompletionItem[]> => {
@@ -293,6 +291,16 @@ async function buildProjectForDocument(document: TextDocument): Promise<ReturnTy
     ...host_application_options,
     hostDefinitions: hostCatalogManager.getDefinitions(host_application_options)
   });
+}
+
+async function publishDiagnosticsForDocument(document: TextDocument): Promise<void> {
+  if (!document.uri.startsWith('file://')) {
+    connection.sendDiagnostics(getClearDiagnosticsPayload(document.uri));
+    return;
+  }
+
+  const project = await buildProjectForDocument(document);
+  connection.sendDiagnostics(getPublishDiagnosticsPayload(project, document.uri));
 }
 
 function toLspPosition(position: Position): Position {

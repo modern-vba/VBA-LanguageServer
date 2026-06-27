@@ -144,6 +144,17 @@ export interface VbaSemanticToken {
   tokenType: SemanticTokenType;
 }
 
+export type SyntaxDiagnosticSeverity = 'error';
+export type SyntaxDiagnosticCode = 'syntax.invalidTrailingCommentContinuation';
+
+export interface SyntaxDiagnostic {
+  code: SyntaxDiagnosticCode;
+  message: string;
+  range: SourceRange;
+  severity: SyntaxDiagnosticSeverity;
+  source: 'vba-language-server';
+}
+
 export const VBA_SEMANTIC_TOKEN_TYPES: SemanticTokenType[] = [
   'namespace',
   'class',
@@ -292,6 +303,7 @@ interface VbaModule {
   withEventsDeclarations: WithEventsDeclaration[];
   implements: string[];
   moduleMembers: ModuleMember[];
+  syntaxDiagnostics: SyntaxDiagnostic[];
 }
 
 export interface VbaProject {
@@ -506,6 +518,10 @@ export function getTypeFields(project: VbaProject, typeName: string): { name: st
     name: field.name,
     range: field.range
   })) ?? [];
+}
+
+export function getSyntaxDiagnostics(project: VbaProject, uri: string): SyntaxDiagnostic[] {
+  return findModule(project, uri)?.syntaxDiagnostics ?? [];
 }
 
 export function getHover(project: VbaProject, request: CompletionRequest): HoverResult | undefined {
@@ -1019,6 +1035,7 @@ function parseModule(file: VbaProjectFile): VbaModule {
   const identity = parsed_identity?.name ?? fallbackModuleIdentity(file.uri);
   const code_start_line = getCodeStartLine(file.uri, lines);
   const parsed_members = parseModuleMembers(file.uri, lines, code_start_line);
+  const syntax_diagnostics = collectSyntaxDiagnostics(lines, code_start_line);
 
   return {
     uri: file.uri,
@@ -1032,7 +1049,8 @@ function parseModule(file: VbaProjectFile): VbaModule {
     procedureScopes: parsed_members.procedureScopes,
     withEventsDeclarations: parsed_members.withEventsDeclarations,
     implements: parsed_members.implements,
-    moduleMembers: parsed_members.moduleMembers
+    moduleMembers: parsed_members.moduleMembers,
+    syntaxDiagnostics: syntax_diagnostics
   };
 }
 
@@ -1054,6 +1072,48 @@ function parseModuleIdentity(lines: string[]): { name: string; range: SourceRang
   }
 
   return undefined;
+}
+
+function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+  for (let line_index = codeStartLine; line_index < lines.length; line_index += 1) {
+    const range = getInvalidTrailingCommentContinuationRange(lines[line_index], line_index);
+    if (range === undefined) {
+      continue;
+    }
+
+    diagnostics.push({
+      code: 'syntax.invalidTrailingCommentContinuation',
+      message: 'Code line-continuation marker cannot be followed by a comment.',
+      range,
+      severity: 'error',
+      source: 'vba-language-server'
+    });
+  }
+
+  return diagnostics;
+}
+
+function getInvalidTrailingCommentContinuationRange(line: string, lineIndex: number): SourceRange | undefined {
+  const code_end = getCodeEndCharacter(line);
+  if (code_end >= line.length) {
+    return undefined;
+  }
+
+  const marker_index = findPreviousNonWhitespace(line, code_end - 1);
+  if (
+    marker_index === undefined
+    || line[marker_index] !== '_'
+    || marker_index === 0
+    || !/\s/.test(line[marker_index - 1])
+  ) {
+    return undefined;
+  }
+
+  return {
+    start: { line: lineIndex, character: marker_index },
+    end: { line: lineIndex, character: line.length }
+  };
 }
 
 function parseDocumentationComment(lines: string[], member_line: number): DocumentationComment | undefined {

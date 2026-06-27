@@ -13,6 +13,7 @@ import {
   getRenameTarget,
   getSemanticTokens,
   getSignatureHelp,
+  getSyntaxDiagnostics,
   getTypeFields,
   resolveName,
   updateVbaProjectFile
@@ -37,6 +38,205 @@ test('VbaProject loads the bundled Excel HostDefinition catalog by default', () 
     ['Application', 'Workbook', 'Worksheet', 'Range']
   );
   assert.deepEqual(host_names, ['Application', 'Workbook', 'Worksheet', 'Range']);
+});
+
+test('syntax diagnostics report invalid trailing-comment code continuations', () => {
+  const invalid_line = '        "needle", _ \' comment';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        invalid_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.invalidTrailingCommentContinuation',
+      message: 'Code line-continuation marker cannot be followed by a comment.',
+      range: {
+        start: { line: 5, character: invalid_line.indexOf('_') },
+        end: { line: 5, character: invalid_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics return multiple invalid trailing-comment code continuations', () => {
+  const first_invalid_line = '        "needle", _ \' first';
+  const second_invalid_line = '        "haystack", _ \' second';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        first_invalid_line,
+        second_invalid_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.invalidTrailingCommentContinuation',
+      message: 'Code line-continuation marker cannot be followed by a comment.',
+      range: {
+        start: { line: 5, character: first_invalid_line.indexOf('_') },
+        end: { line: 5, character: first_invalid_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.invalidTrailingCommentContinuation',
+      message: 'Code line-continuation marker cannot be followed by a comment.',
+      range: {
+        start: { line: 6, character: second_invalid_line.indexOf('_') },
+        end: { line: 6, character: second_invalid_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics ignore valid continuations and apostrophe comments containing underscores', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        '        "needle", _',
+        '        "haystack") \' comment _',
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), []);
+});
+
+test('syntax diagnostics cover cls and frm code while ignoring frm designer text', () => {
+  const class_invalid_line = '        "needle", _ \' class';
+  const form_invalid_line = '        "needle", _ \' form';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        class_invalid_line,
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Dialog.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form Dialog',
+        '  Caption = "needle", _ \' designer',
+        'End',
+        'Attribute VB_Name = "Dialog"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        form_invalid_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.cls'), [
+    {
+      code: 'syntax.invalidTrailingCommentContinuation',
+      message: 'Code line-continuation marker cannot be followed by a comment.',
+      range: {
+        start: { line: 6, character: class_invalid_line.indexOf('_') },
+        end: { line: 6, character: class_invalid_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Dialog.frm'), [
+    {
+      code: 'syntax.invalidTrailingCommentContinuation',
+      message: 'Code line-continuation marker cannot be followed by a comment.',
+      range: {
+        start: { line: 9, character: form_invalid_line.indexOf('_') },
+        end: { line: 9, character: form_invalid_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics are additive to valid regions and preserve invalid fail-closed behavior', () => {
+  const invalid_line = '        "id", _ \' invalid continuation';
+  const active_line = '        ';
+  const chain_line = '    Application.ActiveWorkbook.Worksheets(1).Range("A1").Fi';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Function ReadValue(ByVal Key As String, ByVal Fallback As String) As String',
+        'End Function',
+        '',
+        'Public Sub Run()',
+        '    ReadValue( _',
+        invalid_line,
+        active_line,
+        'End Sub',
+        '',
+        'Public Sub ValidRegion()',
+        chain_line,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.equal(getSyntaxDiagnostics(project, 'file:///project/Worker.bas').length, 1);
+  assert.equal(
+    getSignatureHelp(project, {
+      uri: 'file:///project/Worker.bas',
+      position: { line: 9, character: active_line.length }
+    }),
+    undefined
+  );
+  assert.deepEqual(
+    getCompletions(project, {
+      uri: 'file:///project/Worker.bas',
+      position: { line: 13, character: chain_line.length }
+    }).map((item) => ({ label: item.label, detail: item.detail })),
+    [{ label: 'Find', detail: 'Excel.Find' }]
+  );
 });
 
 test('bundled Excel HostDefinitions appear in completion and hover', () => {

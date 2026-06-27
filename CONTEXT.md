@@ -37,6 +37,10 @@ _Avoid_: active application, default library, preferred host
 Editor coloring for VBA source text. It combines lexical classification for VBA syntax with meaning-aware classification from parsed project information when that information is available.
 _Avoid_: color theme, formatting
 
+**SyntaxDiagnostic**:
+An editor diagnostic that reports malformed VBA source syntax in a `VbaProject`. A `SyntaxDiagnostic` is about grammar and source structure, not semantic checks such as unresolved `VbaDefinition`s, missing `HostDefinition`s, type mismatch, or ambiguous `NameResolution`.
+_Avoid_: compile error, semantic diagnostic, runtime error
+
 **SemanticToken**:
 A meaning-aware classification of a source range, derived from parsed `VbaProject` information. `SemanticToken`s refine `SyntaxHighlighting` for declarations and references, using standard editor token categories whenever a VBA meaning can be represented by one.
 _Avoid_: syntax token, text token
@@ -155,6 +159,9 @@ Domain Expert: "No. Unqualified host completion follows `NameResolution`; use `W
 
 Dev: "Should syntax highlighting only color keywords and comments?"
 Domain Expert: "No. `SyntaxHighlighting` includes lexical VBA coloring and `SemanticToken`s for parsed project meaning."
+
+Dev: "Is an unresolved identifier a `SyntaxDiagnostic`?"
+Domain Expert: "No. `SyntaxDiagnostic`s report malformed VBA grammar and source structure. Unknown names and ambiguous `NameResolution` are semantic concerns."
 
 Dev: "Is source formatting only about casing?"
 Domain Expert: "No. `SourceFormatting` includes `CasingNormalization` and `IndentationFormatting`, but it is not a semantic refactor."
