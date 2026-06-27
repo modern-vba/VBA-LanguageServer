@@ -150,6 +150,7 @@ export type SyntaxDiagnosticCode =
   | 'syntax.invalidSourceCharacter'
   | 'syntax.invalidStatementSeparator'
   | 'syntax.malformedCallableDeclaration'
+  | 'syntax.malformedDeclaration'
   | 'syntax.malformedAttribute'
   | 'syntax.malformedDateLiteral'
   | 'syntax.malformedOption'
@@ -1102,6 +1103,11 @@ function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): Synta
       : [];
     diagnostics.push(...callable_diagnostics);
 
+    const declaration_diagnostics = lexical_diagnostics.length === 0 && callable_diagnostics.length === 0
+      ? collectDeclarationDiagnostics(line, line_index)
+      : [];
+    diagnostics.push(...declaration_diagnostics);
+
     const invalid_trailing_comment_range = getInvalidTrailingCommentContinuationRange(line, line_index);
     if (invalid_trailing_comment_range !== undefined) {
       diagnostics.push({
@@ -1116,6 +1122,7 @@ function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): Synta
     if (
       lexical_diagnostics.length === 0
       && callable_diagnostics.length === 0
+      && declaration_diagnostics.length === 0
       && invalid_trailing_comment_range === undefined
     ) {
       diagnostics.push(...collectStatementBoundaryDiagnostics(line, line_index));
@@ -1919,6 +1926,516 @@ function canonicalPropertyKind(value: string): 'Get' | 'Let' | 'Set' {
     return 'Let';
   }
   return lower_value === 'set' ? 'Set' : 'Get';
+}
+
+interface DeclarationListPrefix {
+  kind: 'variable' | 'constant' | 'redim';
+  declaratorsStart: number;
+}
+
+function collectDeclarationDiagnostics(line: string, lineIndex: number): SyntaxDiagnostic[] {
+  const code_end = getCodeEndCharacter(line);
+  if (getCallableDeclarationHead(line, code_end) !== undefined) {
+    return [];
+  }
+
+  const def_type_diagnostics = collectDefTypeDeclarationDiagnostics(line, lineIndex, code_end);
+  if (def_type_diagnostics !== undefined) {
+    return def_type_diagnostics;
+  }
+
+  const with_events_diagnostics = collectWithEventsDeclarationDiagnostics(line, lineIndex, code_end);
+  if (with_events_diagnostics !== undefined) {
+    return with_events_diagnostics;
+  }
+
+  const prefix = getDeclarationListPrefix(line, code_end);
+  if (prefix === undefined) {
+    return [];
+  }
+
+  return collectDeclarationListDiagnostics(
+    line,
+    lineIndex,
+    prefix.declaratorsStart,
+    code_end,
+    prefix.kind
+  );
+}
+
+function getDeclarationListPrefix(line: string, codeEnd: number): DeclarationListPrefix | undefined {
+  const first_token = readIdentifierTokenAt(line, skipWhitespace(line, 0, codeEnd), codeEnd);
+  if (first_token === undefined) {
+    return undefined;
+  }
+
+  if (first_token.lowerText === 'dim' || first_token.lowerText === 'static') {
+    return {
+      kind: 'variable',
+      declaratorsStart: skipWhitespace(line, first_token.end, codeEnd)
+    };
+  }
+
+  if (first_token.lowerText === 'const') {
+    return {
+      kind: 'constant',
+      declaratorsStart: skipWhitespace(line, first_token.end, codeEnd)
+    };
+  }
+
+  if (first_token.lowerText === 'redim') {
+    const after_redim = skipWhitespace(line, first_token.end, codeEnd);
+    const preserve_token = readIdentifierTokenAt(line, after_redim, codeEnd);
+    const declarators_start = preserve_token?.lowerText === 'preserve'
+      ? skipWhitespace(line, preserve_token.end, codeEnd)
+      : after_redim;
+    return {
+      kind: 'redim',
+      declaratorsStart: declarators_start
+    };
+  }
+
+  if (first_token.lowerText !== 'public' && first_token.lowerText !== 'private') {
+    return undefined;
+  }
+
+  const after_visibility = skipWhitespace(line, first_token.end, codeEnd);
+  const second_token = readIdentifierTokenAt(line, after_visibility, codeEnd);
+  if (second_token === undefined) {
+    return {
+      kind: 'variable',
+      declaratorsStart: after_visibility
+    };
+  }
+
+  if (second_token.lowerText === 'const') {
+    return {
+      kind: 'constant',
+      declaratorsStart: skipWhitespace(line, second_token.end, codeEnd)
+    };
+  }
+
+  if (isNonDataDeclarationKeyword(second_token.lowerText)) {
+    return undefined;
+  }
+
+  return {
+    kind: 'variable',
+    declaratorsStart: after_visibility
+  };
+}
+
+function isNonDataDeclarationKeyword(value: string): boolean {
+  return value === 'sub'
+    || value === 'function'
+    || value === 'property'
+    || value === 'event'
+    || value === 'declare'
+    || value === 'enum'
+    || value === 'type'
+    || value === 'implements'
+    || value === 'option'
+    || value === 'attribute';
+}
+
+function collectWithEventsDeclarationDiagnostics(
+  line: string,
+  lineIndex: number,
+  codeEnd: number
+): SyntaxDiagnostic[] | undefined {
+  const match = /^\s*(?:(?:Public|Private|Dim)\s+)?WithEvents\b/i.exec(line.slice(0, codeEnd));
+  if (match === null) {
+    return undefined;
+  }
+
+  const name_start = skipWhitespace(line, match[0].length, codeEnd);
+  const name_token = readIdentifierTokenAt(line, name_start, codeEnd);
+  if (name_token === undefined || name_token.lowerText === 'as') {
+    return [createMalformedDeclarationDiagnostic(
+      'WithEvents declaration is missing an identifier.',
+      lineIndex,
+      name_start,
+      name_token?.end ?? name_start
+    )];
+  }
+
+  const after_name = skipWhitespace(line, name_token.end, codeEnd);
+  if (!startsWithKeywordAt(line, after_name, 'as', codeEnd)) {
+    return [createMalformedDeclarationDiagnostic(
+      'WithEvents declaration must include As type.',
+      lineIndex,
+      after_name,
+      codeEnd
+    )];
+  }
+
+  const type_diagnostic = getTypeAnnotationDiagnostic(line, lineIndex, after_name, codeEnd);
+  return type_diagnostic === undefined ? [] : [type_diagnostic];
+}
+
+function collectDefTypeDeclarationDiagnostics(
+  line: string,
+  lineIndex: number,
+  codeEnd: number
+): SyntaxDiagnostic[] | undefined {
+  const match =
+    /^\s*(DefBool|DefByte|DefInt|DefLng|DefLngLng|DefLngPtr|DefCur|DefSng|DefDbl|DefDec|DefDate|DefStr|DefObj|DefVar)\b/i.exec(line.slice(0, codeEnd));
+  if (match === null) {
+    return undefined;
+  }
+
+  const ranges_start = skipWhitespace(line, match[0].length, codeEnd);
+  if (ranges_start >= codeEnd) {
+    return [createMalformedDeclarationDiagnostic(
+      'DefType declaration is missing a range.',
+      lineIndex,
+      ranges_start,
+      ranges_start
+    )];
+  }
+
+  const diagnostics: SyntaxDiagnostic[] = [];
+  for (const segment of splitTopLevelSegments(line, ranges_start, codeEnd)) {
+    const trimmed_start = skipWhitespace(line, segment.start, segment.end);
+    const trimmed_end = trimEndIndex(line, segment.end);
+    const range_text = line.slice(trimmed_start, trimmed_end);
+    if (!/^[A-Za-z](?:\s*-\s*[A-Za-z])?$/.test(range_text)) {
+      diagnostics.push(createMalformedDeclarationDiagnostic(
+        'DefType declaration range is malformed.',
+        lineIndex,
+        trimmed_start,
+        trimmed_end
+      ));
+    }
+  }
+
+  return diagnostics;
+}
+
+function collectDeclarationListDiagnostics(
+  line: string,
+  lineIndex: number,
+  startCharacter: number,
+  codeEnd: number,
+  kind: 'variable' | 'constant' | 'redim'
+): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+  for (const segment of splitTopLevelSegments(line, startCharacter, codeEnd)) {
+    diagnostics.push(...collectDeclaratorDiagnostics(line, lineIndex, segment.start, segment.end, kind));
+  }
+
+  return diagnostics;
+}
+
+function collectDeclaratorDiagnostics(
+  line: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number,
+  kind: 'variable' | 'constant' | 'redim'
+): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+  const trimmed_start = skipWhitespace(line, startCharacter, endCharacter);
+  const trimmed_end = trimEndIndex(line, endCharacter);
+  if (trimmed_start >= trimmed_end) {
+    return [createMalformedDeclarationDiagnostic(
+      'Declaration declarator is missing.',
+      lineIndex,
+      startCharacter,
+      endCharacter
+    )];
+  }
+
+  const name_token = readIdentifierTokenAt(line, trimmed_start, trimmed_end);
+  if (name_token === undefined || name_token.lowerText === 'as') {
+    return [createMalformedDeclarationDiagnostic(
+      'Declaration is missing an identifier.',
+      lineIndex,
+      trimmed_start,
+      name_token?.end ?? trimmed_end
+    )];
+  }
+
+  let character_index = skipWhitespace(line, name_token.end, trimmed_end);
+  if (character_index < trimmed_end && line[character_index] === '(') {
+    const closing_paren = findClosingParenInCode(line, character_index, trimmed_end);
+    if (closing_paren === undefined) {
+      diagnostics.push(createMalformedDeclarationDiagnostic(
+        'Array bounds are missing a closing parenthesis.',
+        lineIndex,
+        character_index,
+        trimmed_end
+      ));
+      return diagnostics;
+    }
+
+    const bounds_start = character_index + 1;
+    if (!isValidArrayBounds(line.slice(bounds_start, closing_paren))) {
+      diagnostics.push(createMalformedDeclarationDiagnostic(
+        'Array bounds are malformed.',
+        lineIndex,
+        bounds_start,
+        closing_paren
+      ));
+    }
+    character_index = skipWhitespace(line, closing_paren + 1, trimmed_end);
+  }
+
+  const constant_equals_index = kind === 'constant'
+    ? findTopLevelEquals(line, character_index, trimmed_end)
+    : undefined;
+  const type_annotation_end = constant_equals_index ?? trimmed_end;
+  if (startsWithKeywordAt(line, character_index, 'as', type_annotation_end)) {
+    const type_diagnostic = getTypeAnnotationDiagnostic(line, lineIndex, character_index, type_annotation_end);
+    if (type_diagnostic !== undefined) {
+      diagnostics.push(type_diagnostic);
+      return diagnostics;
+    }
+    character_index = skipWhitespace(
+      line,
+      readTypeAnnotationEnd(line, character_index, type_annotation_end),
+      trimmed_end
+    );
+  }
+
+  if (kind === 'constant') {
+    const equals_index = constant_equals_index ?? findTopLevelEquals(line, character_index, trimmed_end);
+    if (equals_index === undefined) {
+      diagnostics.push(createMalformedDeclarationDiagnostic(
+        'Constant initializer is missing.',
+        lineIndex,
+        trimmed_end,
+        trimmed_end
+      ));
+      return diagnostics;
+    }
+
+    const initializer_start = skipWhitespace(line, equals_index + 1, trimmed_end);
+    if (initializer_start >= trimmed_end) {
+      diagnostics.push(createMalformedDeclarationDiagnostic(
+        'Constant initializer is missing.',
+        lineIndex,
+        equals_index,
+        trimmed_end
+      ));
+    } else if (!isPlausibleConstantInitializer(line.slice(initializer_start, trimmed_end))) {
+      diagnostics.push(createMalformedDeclarationDiagnostic(
+        'Constant initializer is malformed.',
+        lineIndex,
+        initializer_start,
+        trimmed_end
+      ));
+    }
+  }
+
+  return diagnostics;
+}
+
+function getTypeAnnotationDiagnostic(
+  line: string,
+  lineIndex: number,
+  asStart: number,
+  endCharacter: number
+): SyntaxDiagnostic | undefined {
+  let type_start = skipWhitespace(line, asStart + 'As'.length, endCharacter);
+  if (startsWithKeywordAt(line, type_start, 'new', endCharacter)) {
+    type_start = skipWhitespace(line, type_start + 'New'.length, endCharacter);
+  }
+
+  const type_end = readTypeNameEnd(line, type_start, endCharacter);
+  if (type_end === undefined) {
+    return createMalformedDeclarationDiagnostic(
+      'Declaration type annotation is missing a type.',
+      lineIndex,
+      asStart,
+      endCharacter
+    );
+  }
+
+  const after_type = skipWhitespace(line, type_end, endCharacter);
+  if (after_type < endCharacter) {
+    return createMalformedDeclarationDiagnostic(
+      'Declaration type annotation is malformed.',
+      lineIndex,
+      after_type,
+      endCharacter
+    );
+  }
+
+  return undefined;
+}
+
+function readTypeAnnotationEnd(line: string, asStart: number, endCharacter: number): number {
+  let type_start = skipWhitespace(line, asStart + 'As'.length, endCharacter);
+  if (startsWithKeywordAt(line, type_start, 'new', endCharacter)) {
+    type_start = skipWhitespace(line, type_start + 'New'.length, endCharacter);
+  }
+
+  return readTypeNameEnd(line, type_start, endCharacter) ?? type_start;
+}
+
+function readTypeNameEnd(line: string, startCharacter: number, endCharacter: number): number | undefined {
+  if (startCharacter >= endCharacter || !isIdentifierStart(line[startCharacter])) {
+    return undefined;
+  }
+
+  let type_end = readIdentifierEnd(line, startCharacter, endCharacter);
+  if (line[type_end] === '.') {
+    const member_start = type_end + 1;
+    if (member_start >= endCharacter || !isIdentifierStart(line[member_start])) {
+      return undefined;
+    }
+    type_end = readIdentifierEnd(line, member_start, endCharacter);
+  }
+
+  return type_end;
+}
+
+function isValidArrayBounds(text: string): boolean {
+  const trimmed_text = text.trim();
+  if (trimmed_text === '') {
+    return true;
+  }
+
+  return trimmed_text.split(',').every((segment) => {
+    const trimmed_segment = segment.trim();
+    return trimmed_segment !== ''
+      && !/^To\b/i.test(trimmed_segment)
+      && !/\bTo\s*$/i.test(trimmed_segment)
+      && !/[+\-*/\\^&=<>]\s*$/.test(trimmed_segment);
+  });
+}
+
+function isPlausibleConstantInitializer(text: string): boolean {
+  const trimmed_text = text.trim();
+  return trimmed_text !== ''
+    && !/[,+\-*/\\^&=<>]\s*$/.test(trimmed_text)
+    && !/^(?:,|[*/\\^&=<>])/.test(trimmed_text);
+}
+
+function splitTopLevelSegments(
+  line: string,
+  startCharacter: number,
+  endCharacter: number
+): Array<{ start: number; end: number }> {
+  const segments: Array<{ start: number; end: number }> = [];
+  let segment_start = startCharacter;
+  let character_index = startCharacter;
+  let is_in_string = false;
+  let paren_depth = 0;
+
+  while (character_index < endCharacter) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+          continue;
+        }
+        is_in_string = false;
+      }
+      character_index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      is_in_string = true;
+    } else if (character === '(') {
+      paren_depth += 1;
+    } else if (character === ')' && paren_depth > 0) {
+      paren_depth -= 1;
+    } else if (character === ',' && paren_depth === 0) {
+      segments.push({ start: segment_start, end: character_index });
+      segment_start = character_index + 1;
+    }
+
+    character_index += 1;
+  }
+
+  segments.push({ start: segment_start, end: endCharacter });
+  return segments;
+}
+
+function findTopLevelEquals(line: string, startCharacter: number, endCharacter: number): number | undefined {
+  let character_index = startCharacter;
+  let is_in_string = false;
+  let paren_depth = 0;
+
+  while (character_index < endCharacter) {
+    const character = line[character_index];
+    if (is_in_string) {
+      if (character === '"') {
+        if (line[character_index + 1] === '"') {
+          character_index += 2;
+          continue;
+        }
+        is_in_string = false;
+      }
+      character_index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      is_in_string = true;
+    } else if (character === '(') {
+      paren_depth += 1;
+    } else if (character === ')' && paren_depth > 0) {
+      paren_depth -= 1;
+    } else if (character === '=' && paren_depth === 0) {
+      return character_index;
+    }
+
+    character_index += 1;
+  }
+
+  return undefined;
+}
+
+function readIdentifierTokenAt(
+  line: string,
+  startCharacter: number,
+  endCharacter: number
+): CallableDeclarationToken | undefined {
+  if (startCharacter >= endCharacter || !isIdentifierStart(line[startCharacter])) {
+    return undefined;
+  }
+
+  const token_end = readIdentifierEnd(line, startCharacter, endCharacter);
+  const text = line.slice(startCharacter, token_end);
+  return {
+    text,
+    lowerText: text.toLowerCase(),
+    start: startCharacter,
+    end: token_end
+  };
+}
+
+function startsWithKeywordAt(
+  line: string,
+  startCharacter: number,
+  keyword: string,
+  endCharacter: number
+): boolean {
+  const token = readIdentifierTokenAt(line, startCharacter, endCharacter);
+  return token?.lowerText === keyword.toLowerCase();
+}
+
+function createMalformedDeclarationDiagnostic(
+  message: string,
+  lineIndex: number,
+  startCharacter: number,
+  endCharacter: number
+): SyntaxDiagnostic {
+  return {
+    code: 'syntax.malformedDeclaration',
+    message,
+    range: {
+      start: { line: lineIndex, character: startCharacter },
+      end: { line: lineIndex, character: endCharacter }
+    },
+    severity: 'error',
+    source: 'vba-language-server'
+  };
 }
 
 interface StatementSegment {
