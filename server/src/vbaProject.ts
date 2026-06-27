@@ -147,6 +147,10 @@ export interface VbaSemanticToken {
 export type SyntaxDiagnosticSeverity = 'error';
 export type SyntaxDiagnosticCode =
   | 'syntax.invalidTrailingCommentContinuation'
+  | 'syntax.invalidContinuationMarkerSpacing'
+  | 'syntax.invalidContinuationMarkerText'
+  | 'syntax.incompleteContinuation'
+  | 'syntax.missingContinuationMarker'
   | 'syntax.invalidSourceCharacter'
   | 'syntax.invalidStatementSeparator'
   | 'syntax.malformedCall'
@@ -1113,6 +1117,7 @@ function collectSyntaxDiagnostics(lines: string[], codeStartLine: number): Synta
   const pre_expression_diagnostics = [
     ...collectHeaderSyntaxDiagnostics(lines, codeStartLine),
     ...collectConditionalCompilationDiagnostics(lines, codeStartLine),
+    ...collectPhysicalLineContinuationDiagnostics(lines, codeStartLine),
     ...collectDeclarationBlockDiagnostics(lines, codeStartLine),
     ...collectControlFlowDiagnostics(lines, codeStartLine)
   ];
@@ -5664,6 +5669,158 @@ function getUnexpectedTokenAfterNextStatementRange(
   return undefined;
 }
 
+function collectPhysicalLineContinuationDiagnostics(lines: string[], codeStartLine: number): SyntaxDiagnostic[] {
+  const diagnostics: SyntaxDiagnostic[] = [];
+
+  for (let line_index = codeStartLine; line_index < lines.length; line_index += 1) {
+    const invalid_spacing_range = getInvalidContinuationMarkerSpacingRange(lines[line_index], line_index);
+    if (invalid_spacing_range !== undefined) {
+      diagnostics.push({
+        code: 'syntax.invalidContinuationMarkerSpacing',
+        message: 'Code line-continuation marker must be preceded by whitespace.',
+        range: invalid_spacing_range,
+        severity: 'error',
+        source: 'vba-language-server'
+      });
+    }
+
+    const invalid_text_range = getInvalidContinuationMarkerTextRange(lines[line_index], line_index);
+    if (invalid_text_range !== undefined) {
+      diagnostics.push({
+        code: 'syntax.invalidContinuationMarkerText',
+        message: 'Code line-continuation marker cannot be followed by source text.',
+        range: invalid_text_range,
+        severity: 'error',
+        source: 'vba-language-server'
+      });
+    }
+
+    const incomplete_range = getIncompleteContinuationRange(lines, line_index);
+    if (incomplete_range !== undefined) {
+      diagnostics.push({
+        code: 'syntax.incompleteContinuation',
+        message: 'Code line-continuation marker must be followed by continued source text.',
+        range: incomplete_range,
+        severity: 'error',
+        source: 'vba-language-server'
+      });
+    }
+
+    const missing_marker_range = getMissingContinuationMarkerRange(lines, line_index);
+    if (missing_marker_range !== undefined) {
+      diagnostics.push({
+        code: 'syntax.missingContinuationMarker',
+        message: 'Continued source text requires a code line-continuation marker.',
+        range: missing_marker_range,
+        severity: 'error',
+        source: 'vba-language-server'
+      });
+    }
+
+    const trailing_comment_range = getInvalidTrailingCommentContinuationRange(lines[line_index], line_index);
+    if (trailing_comment_range !== undefined) {
+      diagnostics.push({
+        code: 'syntax.invalidTrailingCommentContinuation',
+        message: 'Code line-continuation marker cannot be followed by a comment.',
+        range: trailing_comment_range,
+        severity: 'error',
+        source: 'vba-language-server'
+      });
+    }
+  }
+
+  return diagnostics;
+}
+
+function getInvalidContinuationMarkerSpacingRange(line: string, lineIndex: number): SourceRange | undefined {
+  const code_end = getCodeEndCharacter(line);
+  if (code_end < line.length) {
+    return undefined;
+  }
+
+  const marker_index = findPreviousNonWhitespace(line, code_end - 1);
+  if (
+    marker_index === undefined
+    || line[marker_index] !== '_'
+    || marker_index === 0
+    || /\s/.test(line[marker_index - 1])
+    || isIdentifierPart(line[marker_index - 1])
+  ) {
+    return undefined;
+  }
+
+  return {
+    start: { line: lineIndex, character: marker_index },
+    end: { line: lineIndex, character: marker_index + 1 }
+  };
+}
+
+function getMissingContinuationMarkerRange(lines: string[], lineIndex: number): SourceRange | undefined {
+  const line = lines[lineIndex] ?? '';
+  if (getCodeContinuationMarkerStart(line) !== undefined || !hasSourceText(lines[lineIndex + 1] ?? '')) {
+    return undefined;
+  }
+
+  const code_end = getCodeEndCharacter(line);
+  const code_text = line.slice(0, code_end).trimEnd();
+  if (!/[,(]$/.test(code_text)) {
+    return undefined;
+  }
+
+  const current_indent = skipWhitespace(line, 0, line.length);
+  const next_line = lines[lineIndex + 1] ?? '';
+  const next_code_start = skipWhitespace(next_line, 0, getCodeEndCharacter(next_line));
+  if (next_code_start <= current_indent) {
+    return undefined;
+  }
+
+  return {
+    start: { line: lineIndex, character: code_end },
+    end: { line: lineIndex, character: code_end }
+  };
+}
+
+function getIncompleteContinuationRange(lines: string[], lineIndex: number): SourceRange | undefined {
+  const line = lines[lineIndex] ?? '';
+  const marker_index = getCodeContinuationMarkerStart(line);
+  if (marker_index === undefined || hasSourceText(lines[lineIndex + 1] ?? '')) {
+    return undefined;
+  }
+
+  return {
+    start: { line: lineIndex, character: marker_index },
+    end: { line: lineIndex, character: marker_index + 1 }
+  };
+}
+
+function hasSourceText(line: string): boolean {
+  return line.slice(0, getCodeEndCharacter(line)).trim().length > 0;
+}
+
+function getInvalidContinuationMarkerTextRange(line: string, lineIndex: number): SourceRange | undefined {
+  const code_end = getCodeEndCharacter(line);
+  for (let character_index = 1; character_index < code_end - 1; character_index += 1) {
+    if (
+      line[character_index] !== '_'
+      || !isCodePosition(line, character_index)
+      || !/\s/.test(line[character_index - 1])
+      || !/\s/.test(line[character_index + 1])
+    ) {
+      continue;
+    }
+
+    const following_code_start = skipWhitespace(line, character_index + 1, code_end);
+    if (following_code_start < code_end) {
+      return {
+        start: { line: lineIndex, character: character_index },
+        end: { line: lineIndex, character: line.length }
+      };
+    }
+  }
+
+  return undefined;
+}
+
 function getInvalidTrailingCommentContinuationRange(line: string, lineIndex: number): SourceRange | undefined {
   const code_end = getCodeEndCharacter(line);
   if (code_end >= line.length) {
@@ -6938,6 +7095,9 @@ function getCodeEndCharacter(line: string): number {
     }
 
     if (character === "'") {
+      return character_index;
+    }
+    if (isRemCommentStart(line, character_index)) {
       return character_index;
     }
     if (character === '"') {
