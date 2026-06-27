@@ -1079,6 +1079,287 @@ test('malformed callable declarations keep surrounding ModuleMember ranges usabl
   ]);
 });
 
+test('syntax diagnostics report malformed declaration statements', () => {
+  const missing_name_line = 'Dim As String';
+  const multiple_malformed_line = 'Dim first As, second(1 To ) As Long';
+  const missing_initializer_line = 'Const RATE As Double =';
+  const redim_bounds_line = 'ReDim Preserve values(1 To )';
+  const missing_static_type_line = 'Static cache As';
+  const malformed_def_type_line = 'DefInt A-, 1-Z';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        `    ${missing_name_line}`,
+        `    ${multiple_malformed_line}`,
+        `    ${missing_initializer_line}`,
+        `    ${redim_bounds_line}`,
+        `    ${missing_static_type_line}`,
+        `    ${malformed_def_type_line}`,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'Declaration is missing an identifier.',
+      range: {
+        start: { line: 4, character: 4 + missing_name_line.indexOf('As') },
+        end: { line: 4, character: 4 + missing_name_line.indexOf('As') + 'As'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'Declaration type annotation is missing a type.',
+      range: {
+        start: { line: 5, character: 4 + multiple_malformed_line.indexOf('As') },
+        end: { line: 5, character: 4 + multiple_malformed_line.indexOf(',') }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'Array bounds are malformed.',
+      range: {
+        start: { line: 5, character: 4 + multiple_malformed_line.indexOf('1 To') },
+        end: { line: 5, character: 4 + multiple_malformed_line.indexOf(')') }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'Constant initializer is missing.',
+      range: {
+        start: { line: 6, character: 4 + missing_initializer_line.indexOf('=') },
+        end: { line: 6, character: 4 + missing_initializer_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'Array bounds are malformed.',
+      range: {
+        start: { line: 7, character: 4 + redim_bounds_line.indexOf('1 To') },
+        end: { line: 7, character: 4 + redim_bounds_line.indexOf(')') }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'Declaration type annotation is missing a type.',
+      range: {
+        start: { line: 8, character: 4 + missing_static_type_line.indexOf('As') },
+        end: { line: 8, character: 4 + missing_static_type_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'DefType declaration range is malformed.',
+      range: {
+        start: { line: 9, character: 4 + malformed_def_type_line.indexOf('A-') },
+        end: { line: 9, character: 4 + malformed_def_type_line.indexOf('A-') + 'A-'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    },
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'DefType declaration range is malformed.',
+      range: {
+        start: { line: 9, character: 4 + malformed_def_type_line.indexOf('1-Z') },
+        end: { line: 9, character: 4 + malformed_def_type_line.indexOf('1-Z') + '1-Z'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics report malformed constant initializer expressions', () => {
+  const invalid_initializer_line = 'Const Broken = 1 +';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        `    ${invalid_initializer_line}`,
+        'End Sub'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'Constant initializer is malformed.',
+      range: {
+        start: { line: 4, character: 4 + invalid_initializer_line.indexOf('1 +') },
+        end: { line: 4, character: 4 + invalid_initializer_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+});
+
+test('syntax diagnostics ignore valid declarations and preserve type resolution', () => {
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        'Private moduleWs As Worksheet',
+        'Public Const Version As String = "1.0"',
+        'DefInt A-Z',
+        '',
+        'Public Sub Run()',
+        '    Dim ws As Worksheet',
+        '    Static names(0 To 2) As String',
+        '    Dim created As New Customer',
+        '    Const Limit As Long = 10',
+        '    ReDim values(1 To 10) As Long',
+        '    ws.Na',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Customer.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "Customer"',
+        'Option Explicit',
+        'Private WithEvents Button As CommandButton',
+        '',
+        'Public Property Get DisplayName() As String',
+        'End Property'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/Dialog.frm',
+      text: [
+        'VERSION 5.00',
+        'Begin VB.Form Dialog',
+        '  Caption = "Dim As String"',
+        'End',
+        'Attribute VB_Name = "Dialog"',
+        'Option Explicit',
+        'Private formValue As String'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), []);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Customer.cls'), []);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Dialog.frm'), []);
+
+  const completions = getCompletions(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 12, character: 9 }
+  });
+  assert.deepEqual(
+    completions.map((item) => item.label),
+    ['Name']
+  );
+});
+
+test('malformed declarations fail closed without guessed type metadata', () => {
+  const malformed_type_line = 'Dim ws As';
+  const malformed_with_events_line = 'Private WithEvents As CommandButton';
+  const project = buildVbaProject([
+    {
+      uri: 'file:///project/Worker.bas',
+      text: [
+        'Attribute VB_Name = "Worker"',
+        'Option Explicit',
+        '',
+        'Public Sub Run()',
+        `    ${malformed_type_line}`,
+        '    ws.Na',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/FormModule.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "FormModule"',
+        'Option Explicit',
+        malformed_with_events_line,
+        '',
+        'Private Sub Button_Click()',
+        'End Sub'
+      ].join('\n')
+    },
+    {
+      uri: 'file:///project/CommandButton.cls',
+      text: [
+        'VERSION 1.0 CLASS',
+        'Attribute VB_Name = "CommandButton"',
+        'Option Explicit',
+        '',
+        'Public Event Click()'
+      ].join('\n')
+    }
+  ]);
+
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/Worker.bas'), [
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'Declaration type annotation is missing a type.',
+      range: {
+        start: { line: 4, character: 4 + malformed_type_line.indexOf('As') },
+        end: { line: 4, character: 4 + malformed_type_line.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getSyntaxDiagnostics(project, 'file:///project/FormModule.cls'), [
+    {
+      code: 'syntax.malformedDeclaration',
+      message: 'WithEvents declaration is missing an identifier.',
+      range: {
+        start: { line: 3, character: malformed_with_events_line.indexOf('As') },
+        end: { line: 3, character: malformed_with_events_line.indexOf('As') + 'As'.length }
+      },
+      severity: 'error',
+      source: 'vba-language-server'
+    }
+  ]);
+  assert.deepEqual(getCompletions(project, {
+    uri: 'file:///project/Worker.bas',
+    position: { line: 5, character: 9 }
+  }), []);
+  assert.deepEqual(getDefinition(project, {
+    uri: 'file:///project/FormModule.cls',
+    position: { line: 5, character: 20 }
+  }), {
+    uri: 'file:///project/FormModule.cls',
+    range: {
+      start: { line: 5, character: 12 },
+      end: { line: 5, character: 24 }
+    }
+  });
+});
+
 test('syntax diagnostics cover cls and frm code while ignoring frm designer text', () => {
   const class_invalid_line = '        "needle", _ \' class';
   const form_invalid_line = '        "needle", _ \' form';
